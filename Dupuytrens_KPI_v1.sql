@@ -278,7 +278,8 @@ SELECT COUNT(*) as Count
     JOIN Phase ph ON ph.PhaseId = up.PhaseId -- match phase IDs between Forward.Phase and Forward.UserPhase --
     WHERE diagnosis = 'DUP' -- must have DUP diagnosis --
 		AND ph.Name Like '%Questionnaire (%Dupuytren Short)' -- specify the short questionnaire phase name... --
-		AND ph.CompleteStatus IN (63, 563) -- confirm that the complete status is 'complete' --
+		--AND ph.CompleteStatus = 563 -- confirm that the complete status is 'complete' --
+        AND up.StatusCode = 563
 
 
 

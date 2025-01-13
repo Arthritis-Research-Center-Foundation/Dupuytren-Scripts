@@ -282,11 +282,13 @@ SELECT COUNT(*) as Count
         AND up.StatusCode = 563
 
 -- example
-select name, s.Description, count(*)
+
+select pj.Name, ph.name, s.Description, count(*)
 	from userphase up
 	join phase ph on ph.PhaseId = up.PhaseId
 	join Status s on s.Code = up.StatusCode
+	join Project pj on pj.ProjectId = ph.ProjectId
 	where up.StatusCode = ph.CompleteStatus
-		and ph.ProjectId = 46
+		and pj.Name like 'Dupuytrens'
 		and ph.Active = 1
-	group by name, s.Description
+	group by pj.name, ph.name, s.Description

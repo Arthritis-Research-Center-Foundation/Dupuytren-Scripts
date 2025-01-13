@@ -280,6 +280,14 @@ SELECT COUNT(*) as Count
 		AND ph.Name Like '%Questionnaire (%Dupuytren Short)' -- specify the short questionnaire phase name... --
         AND up.StatusCode = ph.CompleteStatus -- confirm that the complete status is 'complete' --
 
+-- example
 
-
-
+select pj.Name, ph.name, s.Description, count(*)
+	from userphase up
+	join phase ph on ph.PhaseId = up.PhaseId
+	join Status s on s.Code = up.StatusCode
+	join Project pj on pj.ProjectId = ph.ProjectId
+	where up.StatusCode = ph.CompleteStatus
+		and pj.Name like 'Dupuytrens'
+		and ph.Active = 1
+	group by pj.name, ph.name, s.Description

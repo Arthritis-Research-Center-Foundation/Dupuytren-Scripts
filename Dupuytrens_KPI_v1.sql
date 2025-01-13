@@ -281,6 +281,12 @@ SELECT COUNT(*) as Count
 		--AND ph.CompleteStatus = 563 -- confirm that the complete status is 'complete' --
         AND up.StatusCode = 563
 
-
-
-
+-- example
+select name, s.Description, count(*)
+	from userphase up
+	join phase ph on ph.PhaseId = up.PhaseId
+	join Status s on s.Code = up.StatusCode
+	where up.StatusCode = ph.CompleteStatus
+		and ph.ProjectId = 46
+		and ph.Active = 1
+	group by name, s.Description

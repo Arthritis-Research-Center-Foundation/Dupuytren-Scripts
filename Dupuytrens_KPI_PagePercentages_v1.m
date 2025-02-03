@@ -49,8 +49,8 @@ defaultQueryList.questionnairesSent.query = [  'USE Forward ' ...
 		                                       '    AND {SURVEYSELECT} -- limit UserPhase to only include the {SURVEYDESCRIPTION} --']; % SURVEYSELECT = {'ph.Name LIKE ''%Enrollment%''', 'ph.DatabasePrefix = ''Dup##''', 'ph.DatabasePrefix = ''Short##'''} 
                                                                                                                                         % SURVEYDESCRIPTION = {'Dupuytrens Enrollment PhaseId', 'Dupuytrens Long Survey for ph##', 'Dupuytrens Short Survey for ph##'}
 
-defaultQueryList.pageStarted.description = 'The number of people per page who started the page';
-defaultQueryList.pageStarted.query = [   'USE Forward ' ...
+defaultQueryList.pageCompleted.description = 'The number of people who completed the page';
+defaultQueryList.pageCompleted.query = [ 'USE Forward ' ...
                                          'SELECT COUNT(*) AS ''Num Participants that Started Page'' ' ...
 	                                     'FROM Dupuytrens.dbo.{SURVEYPAGEHEADER} q -- grab info for specific page of specific questionnaire --' ...
                                          'JOIN UserPhase up ON q.guid = up.UserId -- match userIDs between Dupuytrens.dbo.{SURVEYPAGEHEADER} and Forward.UserPhase --' ...
@@ -59,12 +59,7 @@ defaultQueryList.pageStarted.query = [   'USE Forward ' ...
 	                                     'JOIN arc.dbo.Natalog n ON n.guid = up.UserId -- joining on Natalog ensures we only include participants still in the database --' ...
 	                                     'WHERE up.StatusCode = ph.SentStatus -- only keep "Sent" activity --' ...
 		                                 '    AND pj.Name = ''Dupuytrens'' -- limit UserPhase to only include the Dupuytrens Registry (aka Project) --' ...
-		                                 '    AND {SURVEYSELECT} -- limit UserPhase to only include the {SURVEYDESCRIPTION} --']; % SURVEYPAGEHEADER = sprintf('%s_pg%d', {'EnrollDup', 'Dup##', 'Short##'}, pageNum (EXCEPT ONE PAGE IS 'pgDrug'))
-                                                                                                                                  % SURVEYSELECT = {'ph.Name LIKE ''%Enrollment%''', 'ph.DatabasePrefix = ''Dup##''', 'ph.DatabasePrefix = ''Short##'''} 
-                                                                                                                                  % SURVEYDESCRIPTION = {'Dupuytrens Enrollment PhaseId', 'Dupuytrens Long Survey for ph##', 'Dupuytrens Short Survey for ph##'}
-
-defaultQueryList.pageCompleted.description = 'The number of people who completed the page';
-defaultQueryList.pageCompleted.query = [ defaultQueryList.pageStarted.query, ...
+		                                 '    AND {SURVEYSELECT} -- limit UserPhase to only include the {SURVEYDESCRIPTION} --', ...
 		                                 '    AND Complete = 1 -- only include complete pages --']; % SURVEYPAGEHEADER = sprintf('%s_pg%d', {'EnrollDup', 'Dup##', 'Short##'}, pageNum (EXCEPT ONE PAGE IS 'pgDrug'))
                                                                                                     % SURVEYSELECT = {'ph.Name LIKE ''%Enrollment%''', 'ph.DatabasePrefix = ''Dup##''', 'ph.DatabasePrefix = ''Short##'''} 
                                                                                                     % SURVEYDESCRIPTION = {'Dupuytrens Enrollment PhaseId', 'Dupuytrens Long Survey for ph##', 'Dupuytrens Short Survey for ph##'}
@@ -80,8 +75,7 @@ try
     % SURVEYPAGEHEADER = sprintf('%s_pg%d', {'EnrollDup', 'Dup##', 'Short##'}, pageNum (EXCEPT ONE PAGE IS 'pgMeds'))
     % SURVEYSELECT = {'ph.Name LIKE ''%Enrollment%''', 'ph.DatabasePrefix = ''Dup##''', 'ph.DatabasePrefix = ''Short##'''} 
     % SURVEYDESCRIPTION = {'Dupuytrens Enrollment PhaseId', 'Dupuytrens Long Survey for ph##', 'Dupuytrens Short Survey for ph##'}
-    % for currentSurvey = {'Enrollment', 'Long', 'Short'}
-    for currentSurvey = {'Short'}
+    for currentSurvey = {'Enrollment', 'Long', 'Short'}
         switch string(currentSurvey)
             case 'Enrollment'
                 surveyName = 'Enroll';
@@ -110,7 +104,6 @@ try
         % run the body of the query, with comments removed (i.e., remove
         % text between -- and --)
         queryList.pageHeaders.(string(currentSurvey)).data = fetch(dbConnection, string(replace(extractAfter(queryList.pageHeaders.(string(currentSurvey)).query, 'USE ' + lettersPattern + ' '), '--' + wildcardPattern + '--', '')));
-        % queryIndex = queryIndex + 1;
 
         % - Determine the list of pages that can be queried for each survey -
         % for each database prefix, the initial order of page headers is
@@ -160,25 +153,15 @@ try
                 for pageNum = str2double(extractBetween(pageHeaders.(string(currentSurvey)).(sprintf('%s%d', surveyName, headerSetPrefixNum)), '[', ']'))'
                     currentSurveyDescription = sprintf(surveyDescription, pageNum);
                     currentSurveyPageHeader = sprintf(surveyPageHeader, phaseNum, pageNum);
-                    % - Total patients who started the current page -
-                    queryList.pageStarted.(string(currentSurvey)).title = sprintf('%s Questionnaire: Total Started', string(currentSurvey));
-                    queryList.pageStarted.(string(currentSurvey)).description = defaultQueryList.pageStarted.description;
-                    % if strcmp(extractAfter(pageHeaders.(string(currentSurvey)).(sprintf('%s%d', surveyName, headerSetPrefixNum))(startsWith(pageHeaders.(string(currentSurvey)).(sprintf('%s%d', surveyName, headerSetPrefixNum)), sprintf('[%d]', pageNum))), sprintf('[%d] ', pageNum)), 'Medications II') % if this criteria is met, then seach for 'pgDrug'
-                    % if ~any(matches(queryList.availableTables.(string(currentSurvey)).data.TABLE_NAME, sprintf('%s%d_pg%d', surveyName, phaseNum, pageNum))) % if current table name can't be found in Dupuytrens tables, then the current page must be pgDrug
-                    %     queryList.pageStarted.(string(currentSurvey)).query.(sprintf('%s%d', surveyName,phaseNum)).(sprintf('pg%d', pageNum)) = sprintf(strrep(strrep(strrep(strrep(defaultQueryList.pageStarted.query, '{SURVEYPAGEHEADER}', surveyPageHeader), '{SURVEYSELECT}', surveySelect), '{SURVEYDESCRIPTION}', surveyDescription), 'pg%d', 'pgDrug'), phaseNum, phaseNum, phaseNum, phaseNum);
-                    % else
-                    %     queryList.pageStarted.(string(currentSurvey)).query.(sprintf('%s%d', surveyName,phaseNum)).(sprintf('pg%d', pageNum)) = sprintf(strrep(strrep(strrep(defaultQueryList.pageStarted.query, '{SURVEYPAGEHEADER}', surveyPageHeader), '{SURVEYSELECT}', surveySelect), '{SURVEYDESCRIPTION}', surveyDescription), phaseNum, pageNum, phaseNum, pageNum, phaseNum, phaseNum);
-                    % end
-                    % execute(dbConnection, string(extract(queryList.pageStarted.(string(currentSurvey)).query.(sprintf('%s%d', surveyName,phaseNum)).(sprintf('pg%d', pageNum)), 'USE ' + lettersPattern)));
-                    % queryList.pageStarted.(string(currentSurvey)).data.(sprintf('%s%d', surveyName,phaseNum)).(sprintf('pg%d', pageNum)) = fetch(dbConnection, string(replace(extractAfter(queryList.pageStarted.(string(currentSurvey)).query.(sprintf('%s%d', surveyName,phaseNum)).(sprintf('pg%d', pageNum)), 'USE ' + lettersPattern + ' '), '--' + wildcardPattern + '--', '')));
-                    queryList.pageStarted.(string(currentSurvey)).data.(sprintf('%s%d', surveyName,phaseNum)).(sprintf('pg%d', pageNum)) = queryList.questionnairesSent.(string(currentSurvey)).data.(sprintf('%s%d', surveyName,phaseNum));
                     % - Total patients who completed the current page -
                     queryList.pageCompleted.(string(currentSurvey)).title = sprintf('%s Questionnaire: Total Completed', string(currentSurvey));
                     queryList.pageCompleted.(string(currentSurvey)).description = defaultQueryList.pageCompleted.description;
                     if ~any(matches(queryList.availableTables.(string(currentSurvey)).data.TABLE_NAME, sprintf('%s%d_pg%d', surveyName, phaseNum, pageNum))) % if current table name can't be found in Dupuytrens tables, then the current page must be pgDrug
-                        queryList.pageCompleted.(string(currentSurvey)).query.(sprintf('%s%d', surveyName,phaseNum)).(sprintf('pg%d', pageNum)) = sprintf(strrep(strrep(strrep(strrep(defaultQueryList.pageStarted.query, '{SURVEYPAGEHEADER}', surveyPageHeader), '{SURVEYSELECT}', surveySelect), '{SURVEYDESCRIPTION}', surveyDescription), 'pg%d', 'pgDrug'), phaseNum, phaseNum, phaseNum, phaseNum);
+                        % queryList.pageCompleted.(string(currentSurvey)).query.(sprintf('%s%d', surveyName,phaseNum)).(sprintf('pg%d', pageNum)) = sprintf(strrep(strrep(strrep(strrep(defaultQueryList.pageStarted.query, '{SURVEYPAGEHEADER}', surveyPageHeader), '{SURVEYSELECT}', surveySelect), '{SURVEYDESCRIPTION}', surveyDescription), 'pg%d', 'pgDrug'), phaseNum, phaseNum, phaseNum, phaseNum);
+                        queryList.pageCompleted.(string(currentSurvey)).query.(sprintf('%s%d', surveyName,phaseNum)).(sprintf('pg%d', pageNum)) = sprintf(strrep(strrep(strrep(strrep(defaultQueryList.pageCompleted.query, '{SURVEYPAGEHEADER}', surveyPageHeader), '{SURVEYSELECT}', surveySelect), '{SURVEYDESCRIPTION}', surveyDescription), 'pg%d', 'pgDrug'), phaseNum, phaseNum, phaseNum, phaseNum);
                     else
-                        queryList.pageCompleted.(string(currentSurvey)).query.(sprintf('%s%d', surveyName,phaseNum)).(sprintf('pg%d', pageNum)) = sprintf(strrep(strrep(strrep(defaultQueryList.pageStarted.query, '{SURVEYPAGEHEADER}', surveyPageHeader), '{SURVEYSELECT}', surveySelect), '{SURVEYDESCRIPTION}', surveyDescription), phaseNum, pageNum, phaseNum, pageNum, phaseNum, phaseNum);
+                        % queryList.pageCompleted.(string(currentSurvey)).query.(sprintf('%s%d', surveyName,phaseNum)).(sprintf('pg%d', pageNum)) = sprintf(strrep(strrep(strrep(defaultQueryList.pageStarted.query, '{SURVEYPAGEHEADER}', surveyPageHeader), '{SURVEYSELECT}', surveySelect), '{SURVEYDESCRIPTION}', surveyDescription), phaseNum, pageNum, phaseNum, pageNum, phaseNum, phaseNum);
+                        queryList.pageCompleted.(string(currentSurvey)).query.(sprintf('%s%d', surveyName,phaseNum)).(sprintf('pg%d', pageNum)) = sprintf(strrep(strrep(strrep(defaultQueryList.pageCompleted.query, '{SURVEYPAGEHEADER}', surveyPageHeader), '{SURVEYSELECT}', surveySelect), '{SURVEYDESCRIPTION}', surveyDescription), phaseNum, pageNum, phaseNum, pageNum, phaseNum, phaseNum);
                     end
                     execute(dbConnection, string(extract(queryList.pageCompleted.(string(currentSurvey)).query.(sprintf('%s%d', surveyName,phaseNum)).(sprintf('pg%d', pageNum)), 'USE ' + lettersPattern)));
                     queryList.pageCompleted.(string(currentSurvey)).data.(sprintf('%s%d', surveyName,phaseNum)).(sprintf('pg%d', pageNum)) = fetch(dbConnection, string(replace(extractAfter(queryList.pageCompleted.(string(currentSurvey)).query.(sprintf('%s%d', surveyName,phaseNum)).(sprintf('pg%d', pageNum)), 'USE ' + lettersPattern + ' '), '--' + wildcardPattern + '--', '')));
@@ -201,17 +184,6 @@ try
             queryList.questionnairesSent.(string(currentSurvey)).data.(extractBefore(surveyPageHeader, '_')) = fetch(dbConnection, string(replace(extractAfter(queryList.questionnairesSent.(string(currentSurvey)).query.(extractBefore(surveyPageHeader, '_')), 'USE ' + lettersPattern + ' '), '--' + wildcardPattern + '--', '')));
             
             for pageNum = str2double(extractBetween(pageHeaders.(string(currentSurvey)).(extractBefore(surveyPageHeader, '_')), '[', ']'))'
-                % - Total patients who started the current page -
-                queryList.pageStarted.(string(currentSurvey)).title = sprintf('%s Questionnaire: Total Started', string(currentSurvey));
-                queryList.pageStarted.(string(currentSurvey)).description = defaultQueryList.pageStarted.description;
-                % if ~any(matches(queryList.availableTables.(string(currentSurvey)).data.TABLE_NAME, sprintf('%s_pg%d', extractBefore(surveyPageHeader, '_'), pageNum))) % if current table name can't be found in Dupuytrens tables, then the current page must be pgDrug
-                %     queryList.pageStarted.(string(currentSurvey)).query.(extractBefore(surveyPageHeader, '_')).(sprintf('pg%d', pageNum)) = strrep(strrep(strrep(strrep(defaultQueryList.pageStarted.query, '{SURVEYPAGEHEADER}', surveyPageHeader), '{SURVEYSELECT}', surveySelect), '{SURVEYDESCRIPTION}', surveyDescription), 'pg%d', 'pgDrug');
-                % else
-                %     queryList.pageStarted.(string(currentSurvey)).query.(extractBefore(surveyPageHeader, '_')).(sprintf('pg%d', pageNum)) = sprintf(strrep(strrep(strrep(defaultQueryList.pageStarted.query, '{SURVEYPAGEHEADER}', surveyPageHeader), '{SURVEYSELECT}', strrep(surveySelect, '%', '%%')), '{SURVEYDESCRIPTION}', surveyDescription), pageNum, pageNum);
-                % end
-                % execute(dbConnection, string(extract(queryList.pageStarted.(string(currentSurvey)).query.(extractBefore(surveyPageHeader, '_')).(sprintf('pg%d', pageNum)), 'USE ' + lettersPattern)));
-                % queryList.pageStarted.(string(currentSurvey)).data.(extractBefore(surveyPageHeader, '_')).(sprintf('pg%d', pageNum)) = fetch(dbConnection, string(replace(extractAfter(queryList.pageStarted.(string(currentSurvey)).query.(extractBefore(surveyPageHeader, '_')).(sprintf('pg%d', pageNum)), 'USE ' + lettersPattern + ' '), '--' + wildcardPattern + '--', '')));
-                queryList.pageStarted.(string(currentSurvey)).data.(extractBefore(surveyPageHeader, '_')).(sprintf('pg%d', pageNum)) = queryList.questionnairesSent.(string(currentSurvey)).data.(extractBefore(surveyPageHeader, '_'));
                 % - Total patients who completed the current page -
                 queryList.pageCompleted.(string(currentSurvey)).title = sprintf('%s Questionnaire: Total Completed', string(currentSurvey));
                 queryList.pageCompleted.(string(currentSurvey)).description = defaultQueryList.pageCompleted.description;
@@ -235,8 +207,7 @@ end
 toc
 %%
 % --- Arrange the data into a neat table ---
-% for currentSurvey = {'Enrollment', 'Long', 'Short'}
-for currentSurvey = {'Short'}
+for currentSurvey = {'Enrollment', 'Long', 'Short'}
     if ~strcmp(currentSurvey, 'Enrollment')
         % each pageHeader will have its own table (cus each pageHeader has
         % different pages). determine which phases go with which
@@ -252,23 +223,6 @@ for currentSurvey = {'Short'}
             else % if on last pageHeader...
                 phasesToInclude = pageHeaderNumList.(string(currentSurvey))(pageHeaderNumIndex) : lastPhaseNum.(string(currentSurvey)); % phases between the last pageHeader and the last phase (including the last phase)
             end
-            % - Page Started -
-            % initialize pageStarted table for current pageHeader
-            outputDataTablesCell.pageStarted.(string(currentSurvey)).(sprintf('%s%d',string(unique(extract(fieldnames(pageHeaders.(string(currentSurvey))), lettersPattern))), pageHeaderNumList.(string(currentSurvey))(pageHeaderNumIndex))) = cell(length(phasesToInclude) + 1, height(pageHeaders.(string(currentSurvey)).(sprintf('%s%d', string(unique(extract(fieldnames(pageHeaders.(string(currentSurvey))), lettersPattern))), pageHeaderNumList.(string(currentSurvey))(pageHeaderNumIndex)))) + 1);
-            outputDataTablesCell.pageStarted.(string(currentSurvey)).(sprintf('%s%d',string(unique(extract(fieldnames(pageHeaders.(string(currentSurvey))), lettersPattern))), pageHeaderNumList.(string(currentSurvey))(pageHeaderNumIndex)))(1, 2:end) = pageHeaders.(string(currentSurvey)).(sprintf('%s%d', string(unique(extract(fieldnames(pageHeaders.(string(currentSurvey))), lettersPattern))), pageHeaderNumList.(string(currentSurvey))(pageHeaderNumIndex)))';
-            outputDataTablesCell.pageStarted.(string(currentSurvey)).(sprintf('%s%d',string(unique(extract(fieldnames(pageHeaders.(string(currentSurvey))), lettersPattern))), pageHeaderNumList.(string(currentSurvey))(pageHeaderNumIndex)))(2:end, 1) = flipud(cellstr(join([repmat(unique(extract(fieldnames(pageHeaders.(string(currentSurvey))), lettersPattern)), length(phasesToInclude), 1), string(phasesToInclude')], '')));
-            % insert data for each page for the current pageHeader
-            currentPhaseNameList = outputDataTablesCell.pageStarted.(string(currentSurvey)).(sprintf('%s%d',string(unique(extract(fieldnames(pageHeaders.(string(currentSurvey))), lettersPattern))), pageHeaderNumList.(string(currentSurvey))(pageHeaderNumIndex)))(2:end, 1)';
-            pageNumList = str2double(extract(fieldnames(queryList.pageStarted.(string(currentSurvey)).data.(sprintf('%s%d',string(unique(extract(fieldnames(pageHeaders.(string(currentSurvey))), lettersPattern))), pageHeaderNumList.(string(currentSurvey))(pageHeaderNumIndex)))), digitsPattern)');
-            for currentPhaseNameIndex = 1:length(currentPhaseNameList)
-                for pageNumIndex = 1:length(pageNumList)
-                    outputDataTablesCell.pageStarted.(string(currentSurvey)).(sprintf('%s%d',string(unique(extract(fieldnames(pageHeaders.(string(currentSurvey))), lettersPattern))), pageHeaderNumList.(string(currentSurvey))(pageHeaderNumIndex)))(currentPhaseNameIndex + 1, pageNumIndex + 1) = table2cell(queryList.pageStarted.(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex))).(sprintf('pg%d', pageNumList(pageNumIndex))));
-                end
-                % append number of questionnaires sent as (n=####) to phase 
-                % name first column
-                outputDataTablesCell.pageStarted.(string(currentSurvey)).(sprintf('%s%d',string(unique(extract(fieldnames(pageHeaders.(string(currentSurvey))), lettersPattern))), pageHeaderNumList.(string(currentSurvey))(pageHeaderNumIndex))){currentPhaseNameIndex + 1, 1} = sprintf('%s (n=%d)', outputDataTablesCell.pageStarted.(string(currentSurvey)).(sprintf('%s%d',string(unique(extract(fieldnames(pageHeaders.(string(currentSurvey))), lettersPattern))), pageHeaderNumList.(string(currentSurvey))(pageHeaderNumIndex))){currentPhaseNameIndex + 1, 1}, cell2mat(table2cell(queryList.questionnairesSent.(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex))))));
-            end
-
             % - Page Completed -
             % initialize pageCompleted table for current pageHeader
             outputDataTablesCell.pageCompleted.(string(currentSurvey)).(sprintf('%s%d',string(unique(extract(fieldnames(pageHeaders.(string(currentSurvey))), lettersPattern))), pageHeaderNumList.(string(currentSurvey))(pageHeaderNumIndex))) = cell(length(phasesToInclude) + 1, height(pageHeaders.(string(currentSurvey)).(sprintf('%s%d', string(unique(extract(fieldnames(pageHeaders.(string(currentSurvey))), lettersPattern))), pageHeaderNumList.(string(currentSurvey))(pageHeaderNumIndex)))) + 1);
@@ -296,7 +250,7 @@ for currentSurvey = {'Short'}
             pageNumList = str2double(extract(fieldnames(queryList.pageCompleted.(string(currentSurvey)).data.(sprintf('%s%d',string(unique(extract(fieldnames(pageHeaders.(string(currentSurvey))), lettersPattern))), pageHeaderNumList.(string(currentSurvey))(pageHeaderNumIndex)))), digitsPattern)');
             for currentPhaseNameIndex = 1:length(currentPhaseNameList)
                 for pageNumIndex = 1:length(pageNumList)
-                    outputDataTablesCell.percentPageCompleted.(string(currentSurvey)).(sprintf('%s%d',string(unique(extract(fieldnames(pageHeaders.(string(currentSurvey))), lettersPattern))), pageHeaderNumList.(string(currentSurvey))(pageHeaderNumIndex))){currentPhaseNameIndex + 1, pageNumIndex + 1} = round(10000 * (table2array(queryList.pageCompleted.(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex))).(sprintf('pg%d', pageNumList(pageNumIndex)))) / table2array(queryList.pageStarted.(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex))).(sprintf('pg%d', pageNumList(pageNumIndex)))))) /100;
+                    outputDataTablesCell.percentPageCompleted.(string(currentSurvey)).(sprintf('%s%d',string(unique(extract(fieldnames(pageHeaders.(string(currentSurvey))), lettersPattern))), pageHeaderNumList.(string(currentSurvey))(pageHeaderNumIndex))){currentPhaseNameIndex + 1, pageNumIndex + 1} = round(10000 * (table2array(queryList.pageCompleted.(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex))).(sprintf('pg%d', pageNumList(pageNumIndex)))) / table2array(queryList.questionnairesSent.(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex)))))) /100;
                 end
                 % append number of questionnaires sent as (n=####) to phase 
                 % name first column
@@ -305,23 +259,6 @@ for currentSurvey = {'Short'}
         end
 
     else
-        % - Page Started -
-        % initialize pageStarted table for current pageHeader
-        outputDataTablesCell.pageStarted.(string(currentSurvey)).(string(unique(extract(fieldnames(pageHeaders.(string(currentSurvey))), lettersPattern)))) = cell(2, height(pageHeaders.(string(currentSurvey)).(string(unique(extract(fieldnames(pageHeaders.(string(currentSurvey))), lettersPattern))))) + 1);
-        outputDataTablesCell.pageStarted.(string(currentSurvey)).(string(unique(extract(fieldnames(pageHeaders.(string(currentSurvey))), lettersPattern))))(1, 2:end) = pageHeaders.(string(currentSurvey)).(string(unique(extract(fieldnames(pageHeaders.(string(currentSurvey))), lettersPattern))))';
-        outputDataTablesCell.pageStarted.(string(currentSurvey)).(string(unique(extract(fieldnames(pageHeaders.(string(currentSurvey))), lettersPattern))))(2:end, 1) = unique(extract(fieldnames(pageHeaders.(string(currentSurvey))), lettersPattern));
-        % insert data for each page for the current pageHeader
-        currentPhaseNameList = outputDataTablesCell.pageStarted.(string(currentSurvey)).(string(unique(extract(fieldnames(pageHeaders.(string(currentSurvey))), lettersPattern))))(2:end, 1)';
-        pageNumList = str2double(extract(fieldnames(queryList.pageStarted.(string(currentSurvey)).data.(string(unique(extract(fieldnames(pageHeaders.(string(currentSurvey))), lettersPattern))))), digitsPattern)');
-        for currentPhaseNameIndex = 1:length(currentPhaseNameList)
-            for pageNumIndex = 1:length(pageNumList)
-                outputDataTablesCell.pageStarted.(string(currentSurvey)).(string(unique(extract(fieldnames(pageHeaders.(string(currentSurvey))), lettersPattern))))(currentPhaseNameIndex + 1, pageNumIndex + 1) = table2cell(queryList.pageStarted.(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex))).(sprintf('pg%d', pageNumList(pageNumIndex))));
-            end
-            % append number of questionnaires sent as (n=####) to phase 
-            % name first column
-            outputDataTablesCell.pageStarted.(string(currentSurvey)).(string(unique(extract(fieldnames(pageHeaders.(string(currentSurvey))), lettersPattern)))){currentPhaseNameIndex + 1, 1} = sprintf('%s (n=%d)', outputDataTablesCell.pageStarted.(string(currentSurvey)).(string(unique(extract(fieldnames(pageHeaders.(string(currentSurvey))), lettersPattern)))){currentPhaseNameIndex + 1, 1}, cell2mat(table2cell(queryList.questionnairesSent.(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex))))));
-        end
-
         % - Page Completed -
         % initialize pageCompleted table for current pageHeader
         outputDataTablesCell.pageCompleted.(string(currentSurvey)).(string(unique(extract(fieldnames(pageHeaders.(string(currentSurvey))), lettersPattern)))) = cell(2, height(pageHeaders.(string(currentSurvey)).(string(unique(extract(fieldnames(pageHeaders.(string(currentSurvey))), lettersPattern))))) + 1);
@@ -349,7 +286,7 @@ for currentSurvey = {'Short'}
         pageNumList = str2double(extract(fieldnames(queryList.pageCompleted.(string(currentSurvey)).data.(string(unique(extract(fieldnames(pageHeaders.(string(currentSurvey))), lettersPattern))))), digitsPattern)');
         for currentPhaseNameIndex = 1:length(currentPhaseNameList)
             for pageNumIndex = 1:length(pageNumList)
-                outputDataTablesCell.percentPageCompleted.(string(currentSurvey)).(string(unique(extract(fieldnames(pageHeaders.(string(currentSurvey))), lettersPattern)))){currentPhaseNameIndex + 1, pageNumIndex + 1} = round(10000 * (table2array(queryList.pageCompleted.(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex))).(sprintf('pg%d', pageNumList(pageNumIndex)))) / table2array(queryList.pageStarted.(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex))).(sprintf('pg%d', pageNumList(pageNumIndex)))))) / 100;
+                outputDataTablesCell.percentPageCompleted.(string(currentSurvey)).(string(unique(extract(fieldnames(pageHeaders.(string(currentSurvey))), lettersPattern)))){currentPhaseNameIndex + 1, pageNumIndex + 1} = round(10000 * (table2array(queryList.pageCompleted.(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex))).(sprintf('pg%d', pageNumList(pageNumIndex)))) / table2array(queryList.questionnairesSent.(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex)))))) / 100;
             end
             % append number of questionnaires sent as (n=####) to phase 
             % name first column
@@ -361,9 +298,7 @@ end
 %% 
 % --- Arrange the data tables into a singular table for placement into a
 % spreadsheet ---
-% for currentSurvey = {'Enrollment', 'Long', 'Short'}
-for currentSurvey = {'Short'}
-    % for tableType = {'percentPageCompleted', 'pageStarted', 'pageCompleted'}
+for currentSurvey = {'Enrollment', 'Long', 'Short'}
     for tableType = {'percentPageCompleted', 'pageCompleted'}
         if ~strcmp(currentSurvey, 'Enrollment')
             % determine the height of the big cell array "table"
@@ -398,10 +333,16 @@ for currentSurvey = {'Short'}
                 % calculate the cell fill colors for cells with numeric
                 % data
                 format.(string(tableType)).(string(currentSurvey)).isNumeric = cellfun(@isnumeric, outputDataBigTableCell.(string(tableType)).(string(currentSurvey))) & ~cellfun(@isempty, outputDataBigTableCell.(string(tableType)).(string(currentSurvey)));
-                format.(string(tableType)).(string(currentSurvey)).fillColor = NaN(size(outputDataBigTableCell.(string(tableType)).(string(currentSurvey))));
-                for cellNum = 1:numel(format.(string(tableType)).(string(currentSurvey)).isNumeric)
-                    if format.(string(tableType)).(string(currentSurvey)).isNumeric(cellNum)
-                        format.(string(tableType)).(string(currentSurvey)).fillColor(cellNum) = excelInteriorColorConverter(colorMapCalc(outputDataBigTableCell.(string(tableType)).(string(currentSurvey)){cellNum} / 100, [255, 0, 0; 255, 255, 0; 0, 255, 0])); % cmap is [red, yellow, green]
+                [format.(string(tableType)).(string(currentSurvey)).fillColorAbsolute, format.(string(tableType)).(string(currentSurvey)).fillColorRelative] = deal(NaN(size(outputDataBigTableCell.(string(tableType)).(string(currentSurvey)))));
+                for rowNum = 1:height(format.(string(tableType)).(string(currentSurvey)).isNumeric)
+                    for colNum = 2:width(format.(string(tableType)).(string(currentSurvey)).isNumeric)
+                        if format.(string(tableType)).(string(currentSurvey)).isNumeric(rowNum, colNum)
+                            % fill color where range is from 0-1
+                            format.(string(tableType)).(string(currentSurvey)).fillColorAbsolute(rowNum, colNum) = excelInteriorColorConverter(colorMapCalc(outputDataBigTableCell.(string(tableType)).(string(currentSurvey)){rowNum, colNum} / 100, [255, 0, 0; 255, 255, 0; 0, 255, 0])); % cmap is [red, yellow, green]
+                            % fill color where range is min(currentPhaseValues) - max(currentPhaseValues) 
+                            % (i.e., map [0,1] onto [min(currentPhaseValues),max(currentPhaseValues)]
+                            format.(string(tableType)).(string(currentSurvey)).fillColorRelative(rowNum, colNum) = excelInteriorColorConverter(colorMapCalc(interp1([min(cell2mat(outputDataBigTableCell.(string(tableType)).(string(currentSurvey))(rowNum, 2:end)) / 100), max(cell2mat(outputDataBigTableCell.(string(tableType)).(string(currentSurvey))(rowNum, 2:end)) / 100)], [0,1], outputDataBigTableCell.(string(tableType)).(string(currentSurvey)){rowNum, colNum} / 100), [255, 0, 0; 255, 255, 0; 0, 255, 0])); % cmap is [red, yellow, green]
+                        end
                     end
                 end
             end
@@ -420,9 +361,15 @@ for currentSurvey = {'Short'}
                 % data
                 format.(string(tableType)).(string(currentSurvey)).isNumeric = cellfun(@isnumeric, outputDataBigTableCell.(string(tableType)).(string(currentSurvey))) & ~cellfun(@isempty, outputDataBigTableCell.(string(tableType)).(string(currentSurvey)));
                 format.(string(tableType)).(string(currentSurvey)).fillColor = NaN(size(outputDataBigTableCell.(string(tableType)).(string(currentSurvey))));
-                for cellNum = 1:numel(format.(string(tableType)).(string(currentSurvey)).isNumeric)
-                    if format.(string(tableType)).(string(currentSurvey)).isNumeric(cellNum)
-                        format.(string(tableType)).(string(currentSurvey)).fillColor(cellNum) = excelInteriorColorConverter(colorMapCalc(outputDataBigTableCell.(string(tableType)).(string(currentSurvey)){cellNum} / 100, [255, 0, 0; 255, 255, 0; 0, 255, 0])); % cmap is [red, yellow, green]
+                for rowNum = 1:height(format.(string(tableType)).(string(currentSurvey)).isNumeric)
+                    for colNum = 2:width(format.(string(tableType)).(string(currentSurvey)).isNumeric)
+                        if format.(string(tableType)).(string(currentSurvey)).isNumeric(rowNum, colNum)
+                            % fill color where range is from 0-1
+                            format.(string(tableType)).(string(currentSurvey)).fillColorAbsolute(rowNum, colNum) = excelInteriorColorConverter(colorMapCalc(outputDataBigTableCell.(string(tableType)).(string(currentSurvey)){rowNum, colNum} / 100, [255, 0, 0; 255, 255, 0; 0, 255, 0])); % cmap is [red, yellow, green]
+                            % fill color where range is min(currentPhaseValues) - max(currentPhaseValues) 
+                            % (i.e., map [0,1] onto [min(currentPhaseValues),max(currentPhaseValues)]
+                            format.(string(tableType)).(string(currentSurvey)).fillColorRelative(rowNum, colNum) = excelInteriorColorConverter(colorMapCalc(interp1([min(cell2mat(outputDataBigTableCell.(string(tableType)).(string(currentSurvey))(rowNum, 2:end)) / 100), max(cell2mat(outputDataBigTableCell.(string(tableType)).(string(currentSurvey))(rowNum, 2:end)) / 100)], [0,1], outputDataBigTableCell.(string(tableType)).(string(currentSurvey)){rowNum, colNum} / 100), [255, 0, 0; 255, 255, 0; 0, 255, 0])); % cmap is [red, yellow, green]
+                        end
                     end
                 end
             end
@@ -432,62 +379,64 @@ end
 
 %%
 % --- Export data to spreadsheets ---
-% tableTypeList = {'percentPageCompleted', 'pageStarted', 'pageCompleted'};
-tableTypeList = {'percentPageCompleted', 'pageCompleted'};
-% for currentSurvey = {'Enrollment', 'Long', 'Short'}
-for currentSurvey = {'Short'}
-    exportFileName = sprintf('Dupuytrens Page Completion Rates - %s.xlsx', string(currentSurvey));
+tableTypeList = {'percentPageCompleted_absColMap', 'percentPageCompleted_relColMap', 'pageCompleted'};
+sheetCount = 1;
+for currentSurvey = {'Enrollment', 'Long', 'Short'}
+    exportFileName = 'Dupuytrens Page Completion Rates.xlsx';
     for tableTypeNum = 1:length(tableTypeList)
-        writecell(outputDataBigTableCell.(string(tableTypeList(tableTypeNum))).(string(currentSurvey)), exportFileName, 'Sheet',string(tableTypeList(tableTypeNum)));
+        % define the table name
+        if contains(tableTypeList(tableTypeNum), '_')
+            tableName = string(extractBefore(tableTypeList(tableTypeNum), '_'));
+        else
+            tableName = tableTypeList{tableTypeNum};
+        end
+        % write the data to a spreadsheet
+        if strcmp(string(currentSurvey), 'Enrollment')
+            writecell(outputDataBigTableCell.(tableName).(string(currentSurvey)), exportFileName, 'Sheet',strrep(sprintf('%s_Enroll', string(tableTypeList(tableTypeNum))), 'percent', '%'));
+        else
+            writecell(outputDataBigTableCell.(tableName).(string(currentSurvey)), exportFileName, 'Sheet',strrep(sprintf('%s_%s', string(tableTypeList(tableTypeNum)), string(currentSurvey)), 'percent', '%'));
+        end
+        % - format spreadsheets -
         e = actxserver('Excel.Application');
         try
             ewb = e.Workbooks.Open([pwd, '\', exportFileName]);
             e.DisplayAlerts = false;
-            if strcmp(tableTypeList(tableTypeNum), 'percentPageCompleted')
-                for colNum = 1:width(format.(string(tableTypeList(tableTypeNum))).(string(currentSurvey)).isNumeric)
-                    for rowNum = 1:height(format.(string(tableTypeList(tableTypeNum))).(string(currentSurvey)).isNumeric)
-                        if format.(string(tableTypeList(tableTypeNum))).(string(currentSurvey)).isNumeric(rowNum, colNum)
+            if contains(tableTypeList(tableTypeNum), 'percentPageCompleted')
+                for colNum = 1:width(format.(tableName).(string(currentSurvey)).isNumeric)
+                    for rowNum = 1:height(format.(tableName).(string(currentSurvey)).isNumeric)
+                        if format.(tableName).(string(currentSurvey)).isNumeric(rowNum, colNum)
                             % highlight cells for color-coded magicalness
-                            ewb.Worksheets.Item(tableTypeNum).Range(excelRangeFinder(rowNum, rowNum, colNum, colNum)).Interior.Color = format.(string(tableTypeList(tableTypeNum))).(string(currentSurvey)).fillColor(rowNum, colNum);
-                            ewb.Save;
+                            if contains(tableTypeList(tableTypeNum), 'absColMap')
+                                % absolute color map
+                                ewb.Worksheets.Item(sheetCount).Range(excelRangeFinder(rowNum, rowNum, colNum, colNum)).Interior.Color = format.(tableName).(string(currentSurvey)).fillColorAbsolute(rowNum, colNum);
+                            else
+                                % relative color map
+                                ewb.Worksheets.Item(sheetCount).Range(excelRangeFinder(rowNum, rowNum, colNum, colNum)).Interior.Color = format.(tableName).(string(currentSurvey)).fillColorRelative(rowNum, colNum);
+                            end
                         end
                     end
                 end
             end
-            for rowNum = format.(string(tableTypeList(tableTypeNum))).(string(currentSurvey)).boldRows
-                % bold the title rows
-                ewb.Worksheets.Item(tableTypeNum).Range(excelRangeFinder(rowNum, rowNum, 2, sum(~cellfun(@isempty, outputDataBigTableCell.(string(tableTypeList(tableTypeNum))).(string(currentSurvey))(rowNum, :))) + 1)).Font.Bold = 'True';
-                ewb.Save;
+            % bold the title rows
+            for rowNum = format.(tableName).(string(currentSurvey)).boldRows
+                ewb.Worksheets.Item(sheetCount).Range(excelRangeFinder(rowNum, rowNum, 2, sum(~cellfun(@isempty, outputDataBigTableCell.(tableName).(string(currentSurvey))(rowNum, :))) + 1)).Font.Bold = 'True';
             end
-            for rowNum = format.(string(tableTypeList(tableTypeNum))).(string(currentSurvey)).bottomBorderRows
-                % bottom border of title rows
-                ewb.Worksheets.Item(tableTypeNum).Range(excelRangeFinder(rowNum, rowNum, 2, sum(~cellfun(@isempty, outputDataBigTableCell.(string(tableTypeList(tableTypeNum))).(string(currentSurvey))(rowNum, :))) + 1)).Borders.Item('xlEdgeBottom').Weight = -4138;
-                ewb.Save;
+            % bottom border of title rows
+            for rowNum = format.(tableName).(string(currentSurvey)).bottomBorderRows
+                ewb.Worksheets.Item(sheetCount).Range(excelRangeFinder(rowNum, rowNum, 2, sum(~cellfun(@isempty, outputDataBigTableCell.(tableName).(string(currentSurvey))(rowNum, :))) + 1)).Borders.Item('xlEdgeBottom').Weight = -4138;
             end
-            for rowNum = format.(string(tableTypeList(tableTypeNum))).(string(currentSurvey)).rightBorderRows
-                % right border of first column in rows containing data
-                ewb.Worksheets.Item(tableTypeNum).Range(excelRangeFinder(rowNum, rowNum, 1, 1)).Borders.Item('xlEdgeRight').Weight = -4138;
-                ewb.Save;
+            % right border of first column in rows containing data
+            for rowNum = format.(tableName).(string(currentSurvey)).rightBorderRows
+                ewb.Worksheets.Item(sheetCount).Range(excelRangeFinder(rowNum, rowNum, 1, 1)).Borders.Item('xlEdgeRight').Weight = -4138;
             end
-            % % bottom border of SD row
-            % ewb.Worksheets.Item(1).Range(border.Bottom.Range).Borders.Item('xlEdgeTop').Weight = -4138;
-            % ewb.Save;
-            % % change font to calibri size 11
-            % ewb.Worksheets.Item(1).Range(font.Range).Font.Name = 'Calibri';
-            % ewb.Save;
-            % ewb.Worksheets.Item(1).Range(font.Range).Font.Size = 11;
-            % ewb.Save;
-            % % change column width of columns to be normal width
-            % ewb.Worksheets.Item(1).Range("A1").ColumnWidth = 11.64;
-            % ewb.Save;
-            % ewb.Worksheets.Item(1).Range(border.Top.Range).ColumnWidth = 8.09;
-            % ewb.Save;
+            ewb.Save;
             ewb.Close(false);
             e.Quit % Close excel application (otherwise, excel application won't be visible and it will need to be closed from the task manager)
         catch ME
             e.Quit % Close excel application (otherwise, excel application won't be visible and it will need to be closed from the task manager)
             rethrow(ME)
         end
+        sheetCount = sheetCount + 1;
     end
 end
 
@@ -507,7 +456,7 @@ function rgbArray = colorMapCalc(percentVal, customCMap)
             rgbArray = customCMap(cmapLoc, :);
         else
             for rgbIndex = 1:3
-                rgbArray(rgbIndex) = interp1([floor(cmapLoc), ceil(cmapLoc)], [customCMap(floor(cmapLoc), rgbIndex), customCMap(ceil(cmapLoc), rgbIndex)], cmapLoc);
+                rgbArray(rgbIndex) = round(interp1([floor(cmapLoc), ceil(cmapLoc)], [customCMap(floor(cmapLoc), rgbIndex), customCMap(ceil(cmapLoc), rgbIndex)], cmapLoc));
             end
         end
     end

@@ -1,0 +1,74 @@
+USE Forward;
+DROP TABLE IF EXISTS #pageQueryResults
+CREATE TABLE #pageQueryResults (
+	   DatabasePrefix VARCHAR(MAX), PageNum VARCHAR(10), UserID VARCHAR(MAX), LastActivityDate DATETIME, SurveyStatus INT, PostalCode VARCHAR(20)
+);
+
+DROP TABLE IF EXISTS #pageDataFull
+CREATE TABLE #pageDataFull (
+	   DatabasePrefix VARCHAR(MAX), PageNum VARCHAR(10), UserID VARCHAR(MAX), LastActivityDate DATETIME, SurveyStatus INT, PostalCode VARCHAR(20)
+);
+
+DECLARE @currentTableName varchar(max) = '';
+DECLARE @currentTableNameShort varchar(max) = '';
+DECLARE @currentPageNum INT;
+DECLARE @currentPhaseStatus varchar(max) = '';
+DECLARE @currentDatabasePrefix varchar(max) = '';
+DECLARE @sql varchar(max) = '';
+-- Generate a list of page table names, their page numbers, their phase statuses, and their database prefixes for the current project. These will be used to dynamically query page tables. --
+DECLARE tableListCursor CURSOR FOR SELECT DISTINCT 
+	pj.Name + '.dbo.' + ph.DatabasePrefix + '_' + 
+    CASE 
+        WHEN s.SectionTypeId = 5 THEN 'pgDrug'
+        ELSE 'pg' + CAST(p.PageNumber as VARCHAR(3))
+    END AS 'PageTable', 
+	ph.DatabasePrefix + '_' + CASE 
+        WHEN s.SectionTypeId = 5 THEN 'pgDrug'
+        ELSE 'pg' + CAST(p.PageNumber as VARCHAR(3))
+    END as 'TableName', ph.DatabasePrefix, p.PageNumber, nsr.ColumnTitle as 'PhaseStatus'
+    FROM Forward.dbo.Phase ph
+    JOIN Forward.dbo.Project pj ON pj.ProjectId = ph.ProjectId
+    JOIN Forward.dbo.Page p ON p.SurveyToolId = ph.SurveyToolId
+    JOIN Forward.dbo.Section s ON s.PageId = p.PageId
+	JOIN ProjectCategories pc on pj.ProjectId = pc.ProjectId
+	JOIN ProjectCategory pcc on pc.ProjectCategoryId = pcc.ProjectCategoryId
+	JOIN NatalogSurveyReference nsr on nsr.NatalogSurveyReferenceId = ph.NatalogSurveyReferenceId
+    WHERE pj.ProjectId = (SELECT ProjectId FROM Forward.dbo.Project WHERE Name = 'NDB') --VARIABLE--
+	ORDER BY p.PageNumber;
+OPEN tableListCursor;
+FETCH NEXT FROM tableListCursor INTO @currentTableName, @currentTableNameShort, @currentDatabasePrefix, @currentPageNum, @currentPhaseStatus;
+WHILE @@FETCH_STATUS = 0
+BEGIN
+	-- pageQuery into #pageQueryResults: Retrieve all the rows for the current page table, which contain UserID (from page table), LastActivityDate (from page table), SurveyStatus (from Natalog via e.g. "n.jan21"), and PostalCode (from Natalog) --  
+	SET @sql = N'
+		WITH pageQuery AS (SELECT q.GUID as ' + QUOTENAME('UserID') + ', q.Date as ' + QUOTENAME('LastActivityDate') + ', n.' + @currentPhaseStatus + ' as ' + QUOTENAME('SurveyStatus') + ', n.zip as ' + QUOTENAME('PostalCode') + '
+						   FROM ' + @currentTableName + ' q
+						   JOIN arc.dbo.Natalog n ON q.guid = n.guid) 
+
+		INSERT INTO #pageQueryResults (UserID, LastActivityDate, SurveyStatus, PostalCode)
+		SELECT UserID, LastActivityDate, SurveyStatus, PostalCode
+		FROM pageQuery';
+	EXEC(@sql);
+
+	-- pageDataFullQuery: Add @currentDatabasePrefix and either "pg0#" or "pg##" to the page table results from #pageQueryResults --  
+	WITH pageDataFullQuery AS (SELECT @currentDatabasePrefix AS 'DatabasePrefixVar', 
+							 		  'pg' + CASE WHEN @currentPageNum > 9 THEN CAST(@currentPageNum AS VARCHAR(3)) ELSE '0' + CAST(@currentPageNum AS VARCHAR(3)) END as 'PageNumber', 
+									  pqr.UserID, pqr.LastActivityDate, pqr.SurveyStatus, pqr.PostalCode FROM #pageQueryResults pqr)
+
+	-- pageDataFullQuery into #pageDataFull -- 
+	INSERT INTO #pageDataFull (DatabasePrefix, PageNum, UserID, LastActivityDate, SurveyStatus, PostalCode)
+	SELECT *
+	FROM pageDataFullQuery
+
+	-- Clear #pageQueryResults, so #pageQueryResults does not get appended to itself resulting in exponential duplication of its data --
+	DELETE FROM #pageQueryResults
+
+	FETCH NEXT FROM tableListCursor INTO @currentTableName, @currentTableNameShort, @currentDatabasePrefix, @currentPageNum, @currentPhaseStatus;
+END
+CLOSE tableListCursor;
+DEALLOCATE tableListCursor;
+GO
+
+SELECT * 
+FROM #pageDataFull
+ORDER BY UserID, PageNum

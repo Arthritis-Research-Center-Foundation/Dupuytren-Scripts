@@ -7,7 +7,7 @@
 % own outreach efforts are.". THIS SCRIPT ADDS THE CALCULATIONS OF THE 
 % PERCENT OF PARTICIPANTS THAT COMPLETE EACH SURVEY PAGE. 02/03/2025
 % -------------------------------------------------------------------------
-% ------ Standard KIP Section ------
+% ------ Standard KPI Section ------
 
 try
     dbConnection = database('FORWARD', 'matt', 'ardent-refurbished-knit');
@@ -316,7 +316,38 @@ else % if an existing spreadsheet exists, load it, then append data.
         end
     end
 end
+
 %%
+% --- Arrange the data tables into a singular table for placement into a
+% spreadsheet to be imported into Power BI ---
+% initialize outputDataPowerBI
+% outputDataPowerBI = cell(height(outputData), width(outputData) + 1);
+outputDataPowerBI = cell(height(outputData) - 1, 3);
+% outputDataPowerBI(1,:) = [{'Survey','Period','Status'}, fliplr(cellstr(extract([outputData{1,3:end}], digitsPattern(4) + '/' + digitsPattern(2) + '/' + digitsPattern(2))))];
+% outputDataPowerBI(1,:) = {'Survey','Period','Status','Date','Data'};
+% initialize Survey
+% outputDataPowerBI(2:end,1) = replace(extractBefore(outputData(2:end,1), ':'), ' Questionnaire', '');
+outputDataPowerBI(:,1) = replace(extractBefore(outputData(2:end,1), ':'), ' Questionnaire', '');
+% initialize Period
+% outputDataPowerBI(contains(outputData(:,1), 'Week'), 2) = deal({'This Week'});
+% outputDataPowerBI(contains(outputData(:,1), 'Current Phase'), 2) = deal({'Current Phase'});
+% outputDataPowerBI(contains(outputData(:,1), 'Ever'), 2) = deal({'All Time'});
+outputDataPowerBI(contains(outputData(2:end,1), 'Week'), 2) = deal({'This Week'});
+outputDataPowerBI(contains(outputData(2:end,1), 'Current Phase'), 2) = deal({'Current Phase'});
+outputDataPowerBI(contains(outputData(2:end,1), 'Ever'), 2) = deal({'All Time'});
+% initialize Status
+for statusName = {'Sent','Started','Completed'}
+    % outputDataPowerBI(contains(outputData(:,1), statusName), 3) = deal(statusName);
+    outputDataPowerBI(contains(outputData(2:end,1), statusName), 3) = deal(statusName);
+end
+% % assign data
+% outputDataPowerBI(2:end, 4:end) = fliplr(outputData(2:end, 3:end));
+% assign remaining Survey, Period, Status, Date, and Data
+outputDataPowerBI = [{'Survey','Period','Status','Date','Data'}; repmat(outputDataPowerBI, width(outputData) - 2, 1), reshape(repmat(fliplr(cellstr(extract([outputData{1,3:end}], digitsPattern(4) + '/' + digitsPattern(2) + '/' + digitsPattern(2)))), height(outputData) - 1, 1), 2*height(outputDataPowerBI), []), reshape(fliplr(outputData(2:end, 3:end)), 2*height(outputDataPowerBI), [])];
+
+
+%%
+writecell(outputDataPowerBI, 'Dupuytrens KPI for Power BI.xlsx', 'Sheet','phaseAggregates');
 writecell(outputData, 'Dupuytrens KPI.xlsx', 'Sheet','phaseAggregates')
 
 %%
@@ -404,6 +435,25 @@ defaultQueryList.pageCompleted.query = [ 'USE Forward ' ...
                                                                                           % SURVEYDESCRIPTION = {'Dupuytrens Enrollment PhaseId', 'Dupuytrens Long Survey for ph##', 'Dupuytrens Short Survey for ph##'}      
                                                                                           % NATALOGPHASEID = whichever natalog phase id matches the current survey (e.g., jul24 for Dup87). natalog phase id and survey names can be found in queryList.availablePhases.(string(currentSurvey)).data
 
+defaultQueryList.pageCompletedWeekday.description = 'The number of people who completed the page by each day of the week AND the number of the weekday';
+defaultQueryList.pageCompletedWeekday.query = [ 'USE Forward ' ...
+                                                'SELECT DATEPART(weekday, up.ActivityDate) AS ''Weekday Num'', COUNT(DATEPART(weekday, up.ActivityDate)) AS ''Count'' ' ...
+	                                            'FROM Dupuytrens.dbo.{SURVEYPAGEHEADER} q -- grab info for specific page of specific questionnaire --' ...
+                                                'JOIN UserPhase up ON q.guid = up.UserId -- match userIDs between Dupuytrens.dbo.{SURVEYPAGEHEADER} and Forward.UserPhase --' ...
+	                                            'JOIN Phase ph ON ph.PhaseId = up.PhaseId -- match phase IDs between Forward.Phase and Forward.UserPhase --' ...
+	                                            'JOIN Project pj ON pj.ProjectId = ph.ProjectId -- match projectIDs between Forward.Project and Forward.Phase --' ...
+	                                            'JOIN arc.dbo.Natalog n ON n.guid = up.UserId -- joining on Natalog ensures we only include participants still in the database --' ...
+	                                            'WHERE up.StatusCode = ph.SentStatus -- only keep "Sent" activity --' ...
+		                                        '    AND pj.Name = ''Dupuytrens'' -- limit UserPhase to only include the Dupuytrens Registry (aka Project) --' ...
+		                                        '    AND {SURVEYSELECT} -- limit UserPhase to only include the {SURVEYDESCRIPTION} --', ...
+		                                        '    AND Complete = 1 -- only include complete pages --'...
+                                                '    AND {NATALOGPHASEID} = ph.CompleteStatus -- confirm CompleteStatus --'...
+                                                'GROUP BY DATEPART(weekday, up.ActivityDate)']; % SURVEYPAGEHEADER = sprintf('%s_pg%d', {'EnrollDup', 'Dup##', 'Short##'}, pageNum (EXCEPT ONE PAGE IS 'pgDrug'))
+                                                                                                % SURVEYSELECT = {'ph.Name LIKE ''%Enrollment%''', 'ph.DatabasePrefix = ''Dup##''', 'ph.DatabasePrefix = ''Short##'''} 
+                                                                                                % SURVEYDESCRIPTION = {'Dupuytrens Enrollment PhaseId', 'Dupuytrens Long Survey for ph##', 'Dupuytrens Short Survey for ph##'}      
+                                                                                                % NATALOGPHASEID = whichever natalog phase id matches the current survey (e.g., jul24 for Dup87). natalog phase id and survey names can be found in queryList.availablePhases.(string(currentSurvey)).data
+
+                                                                                                                                                                       
 %%
 tic
 try
@@ -445,7 +495,8 @@ try
            queryList.questionnairesSent.(string(currentSurvey)), ...
            queryList.pageStarted.(string(currentSurvey)), ...
            queryList.pageCompleted.(string(currentSurvey)), ...
-           queryList.pageUnfinished.(string(currentSurvey))] = deal(struct);
+           queryList.pageUnfinished.(string(currentSurvey)), ...
+           queryList.pageCompletedWeekday.(string(currentSurvey))] = deal(struct);
 
         % query pageHeaders
         queryList.pageHeaders.(string(currentSurvey)) = evalQuery(queryList.pageHeaders.(string(currentSurvey)), ...
@@ -537,6 +588,15 @@ try
                                                                                     dbConnection, ...
                                                                                     sprintf('%s%s', surveyName, string(phaseName)), ...
                                                                                     sprintf('pg%d', pageNum));
+                        % - Number of patients who completed current page by
+                        % days of the week -
+                        queryList.pageCompletedWeekday.(string(currentSurvey)) = evalQuery(queryList.pageCompletedWeekday.(string(currentSurvey)), ...
+                                                                                         sprintf('%s Questionnaire: Total Completed by Weekday', string(currentSurvey)), ...
+                                                                                         defaultQueryList.pageCompletedWeekday.description, ...
+                                                                                         sprintf(strrep(strrep(strrep(strrep(strrep(defaultQueryList.pageCompletedWeekday.query, '{NATALOGPHASEID}', currentNatalogPhaseID), '{SURVEYPAGEHEADER}', surveyPageHeader), '{SURVEYSELECT}', surveySelect), '{SURVEYDESCRIPTION}', currentSurveyDescription), 'pg%d', 'pgDrug'), string(phaseName), string(phaseName), string(phaseName)), ...
+                                                                                         dbConnection, ...
+                                                                                         sprintf('%s%s', surveyName, string(phaseName)), ...
+                                                                                         sprintf('pg%d', pageNum));
                     else
                         queryList.pageStarted.(string(currentSurvey)) = evalQuery(queryList.pageStarted.(string(currentSurvey)), ...
                                                                                   sprintf('%s Questionnaire: Total Started', string(currentSurvey)), ...
@@ -552,6 +612,15 @@ try
                                                                                     dbConnection, ...
                                                                                     sprintf('%s%s', surveyName, string(phaseName)), ...
                                                                                     sprintf('pg%d', pageNum));
+                        % - Number of patients who completed current page by
+                        % days of the week -
+                        queryList.pageCompletedWeekday.(string(currentSurvey)) = evalQuery(queryList.pageCompletedWeekday.(string(currentSurvey)), ...
+                                                                                         sprintf('%s Questionnaire: Total Completed by Weekday', string(currentSurvey)), ...
+                                                                                         defaultQueryList.pageCompletedWeekday.description, ...
+                                                                                         sprintf(strrep(strrep(strrep(strrep(defaultQueryList.pageCompletedWeekday.query, '{NATALOGPHASEID}', currentNatalogPhaseID), '{SURVEYPAGEHEADER}', surveyPageHeader), '{SURVEYSELECT}', surveySelect), '{SURVEYDESCRIPTION}', currentSurveyDescription), string(phaseName), pageNum, string(phaseName), pageNum, string(phaseName)), ...
+                                                                                         dbConnection, ...
+                                                                                         sprintf('%s%s', surveyName, string(phaseName)), ...
+                                                                                         sprintf('pg%d', pageNum));
                     end
                     % pageUnfinished = pageStarted - pageCompleted
                     queryList.pageUnfinished.(string(currentSurvey)).title = sprintf('%s Questionnaire: Total Unfinished', string(currentSurvey));
@@ -609,6 +678,15 @@ try
                                                                                 dbConnection, ...
                                                                                 extractBefore(surveyPageHeader, '_'), ...
                                                                                 sprintf('pg%d', pageNum));
+                    % - Number of patients who completed current page by
+                    % days of the week -
+                    queryList.pageCompletedWeekday.(string(currentSurvey)) = evalQuery(queryList.pageCompletedWeekday.(string(currentSurvey)), ...
+                                                                                     sprintf('%s Questionnaire: Total Completed by Weekday', string(currentSurvey)), ...
+                                                                                     defaultQueryList.pageCompletedWeekday.description, ...
+                                                                                     strrep(strrep(strrep(strrep(strrep(defaultQueryList.pageCompletedWeekday.query, '{NATALOGPHASEID}', currentNatalogPhaseID), '{SURVEYPAGEHEADER}', surveyPageHeader), '{SURVEYSELECT}', surveySelect), '{SURVEYDESCRIPTION}', surveyDescription), 'pg%d', 'pgDrug'), ...
+                                                                                     dbConnection, ...
+                                                                                     extractBefore(surveyPageHeader, '_'), ...
+                                                                                     sprintf('pg%d', pageNum));
                 else
                     queryList.pageStarted.(string(currentSurvey)) = evalQuery(queryList.pageStarted.(string(currentSurvey)), ...
                                                                               sprintf('%s Questionnaire: Total Started', string(currentSurvey)), ...
@@ -624,6 +702,15 @@ try
                                                                                 dbConnection, ...
                                                                                 extractBefore(surveyPageHeader, '_'), ...
                                                                                 sprintf('pg%d', pageNum));
+                    % - Number of patients who completed current page by
+                    % days of the week -
+                    queryList.pageCompletedWeekday.(string(currentSurvey)) = evalQuery(queryList.pageCompletedWeekday.(string(currentSurvey)), ...
+                                                                                     sprintf('%s Questionnaire: Total Completed by Weekday', string(currentSurvey)), ...
+                                                                                     defaultQueryList.pageCompletedWeekday.description, ...
+                                                                                     sprintf(strrep(strrep(strrep(strrep(defaultQueryList.pageCompletedWeekday.query, '{NATALOGPHASEID}', currentNatalogPhaseID), '{SURVEYPAGEHEADER}', surveyPageHeader), '{SURVEYSELECT}', strrep(surveySelect, '%', '%%')), '{SURVEYDESCRIPTION}', surveyDescription), pageNum, pageNum), ...
+                                                                                     dbConnection, ...
+                                                                                     extractBefore(surveyPageHeader, '_'), ...
+                                                                                     sprintf('pg%d', pageNum));
                 end
                 % pageUnfinished = pageStarted - pageCompleted
                 queryList.pageUnfinished.(string(currentSurvey)).title = sprintf('%s Questionnaire: Total Unfinished', string(currentSurvey));
@@ -672,13 +759,24 @@ for currentSurvey = {'Enrollment', 'Long', 'Short'}
 
     for pageHeaderUniqueNum = 1:length(pageHeadersUnique.(string(currentSurvey)).headers)
         % - Initialize outputDataTablesCell tables for current pageHeader -
-        for tableType = {'pageStarted', 'pageCompleted', 'pageUnfinished', 'percentPageStarted', 'percentPageCompleted', 'percentPageFinished'}
+        for tableType = {'pageStarted', 'pageCompleted', 'pageUnfinished', 'pageCompletedWeekday', 'percentPageStarted', 'percentPageCompleted', 'percentPageFinished', 'percentPageCompletedWeekday'}
             % initialize outputDataTablesCell tables for current pageHeader
-            outputDataTablesCell.(string(tableType)).(string(currentSurvey)){pageHeaderUniqueNum} = cell(length(pageHeadersUnique.(string(currentSurvey)).phases{pageHeaderUniqueNum}) + 1, height(pageHeadersUnique.(string(currentSurvey)).headers{pageHeaderUniqueNum}) + 1);
+            if ~contains(tableType, 'Weekday')
+                outputDataTablesCell.(string(tableType)).(string(currentSurvey)){pageHeaderUniqueNum} = cell(length(pageHeadersUnique.(string(currentSurvey)).phases{pageHeaderUniqueNum}) + 1, height(pageHeadersUnique.(string(currentSurvey)).headers{pageHeaderUniqueNum}) + 1);
+                outputDataTablesCell.(string(tableType)).(string(currentSurvey)){pageHeaderUniqueNum}(2:end, 1) = pageHeadersUnique.(string(currentSurvey)).phases{pageHeaderUniqueNum}';
+            else
+                outputDataTablesCell.(string(tableType)).(string(currentSurvey)){pageHeaderUniqueNum} = cell((7 * length(pageHeadersUnique.(string(currentSurvey)).phases{pageHeaderUniqueNum})) + 1, height(pageHeadersUnique.(string(currentSurvey)).headers{pageHeaderUniqueNum}) + 1);
+                outputDataTablesCell.(string(tableType)).(string(currentSurvey)){pageHeaderUniqueNum}(2:end, 1) = reshape(repmat(pageHeadersUnique.(string(currentSurvey)).phases{pageHeaderUniqueNum}, 7, 1), [], 1);
+            end
             outputDataTablesCell.(string(tableType)).(string(currentSurvey)){pageHeaderUniqueNum}(1, 2:end) = pageHeadersUnique.(string(currentSurvey)).headers{pageHeaderUniqueNum}';
-            outputDataTablesCell.(string(tableType)).(string(currentSurvey)){pageHeaderUniqueNum}(2:end, 1) = pageHeadersUnique.(string(currentSurvey)).phases{pageHeaderUniqueNum}';
+            
             % insert data for each page for the current pageHeader
-            currentPhaseNameList = outputDataTablesCell.(string(tableType)).(string(currentSurvey)){pageHeaderUniqueNum}(2:end, 1)';
+            % if ~contains(tableType, 'dayOfWeek')
+            %     currentPhaseNameList = outputDataTablesCell.(string(tableType)).(string(currentSurvey)){pageHeaderUniqueNum}(2:end, 1)';
+            % else
+            %     currentPhaseNameList = unique(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){pageHeaderUniqueNum}(2:end, 1)', 'stable');
+            % end
+            currentPhaseNameList = unique(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){pageHeaderUniqueNum}(2:end, 1)', 'stable');
             pageNumList = str2double(extractBetween(pageHeadersUnique.(string(currentSurvey)).headers{pageHeaderUniqueNum}, '[', ']'))'; % assume all tables have the same page numbers as pageStarted
             for currentPhaseNameIndex = 1:length(currentPhaseNameList)
                 switch string(tableType)
@@ -694,6 +792,14 @@ for currentSurvey = {'Enrollment', 'Long', 'Short'}
                         for pageNumIndex = 1:length(pageNumList)
                             outputDataTablesCell.(string(tableType)).(string(currentSurvey)){pageHeaderUniqueNum}{currentPhaseNameIndex + 1, pageNumIndex + 1} = round(10000 * (table2array(queryList.pageCompleted.(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex))).(sprintf('pg%d', pageNumList(pageNumIndex)))) / (table2array(queryList.pageStarted.(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex))).(sprintf('pg%d', pageNumList(pageNumIndex)))) + table2array(queryList.pageCompleted.(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex))).(sprintf('pg%d', pageNumList(pageNumIndex))))))) / 100;
                         end
+                    case 'pageCompletedWeekday'
+                        for pageNumIndex = 1:length(pageNumList)
+                            outputDataTablesCell.(string(tableType)).(string(currentSurvey)){pageHeaderUniqueNum}(7*(currentPhaseNameIndex-1) + queryList.(string(tableType)).(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex))).(sprintf('pg%d', pageNumList(pageNumIndex))).WeekdayNum + 1, pageNumIndex + 1) = num2cell(queryList.(string(tableType)).(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex))).(sprintf('pg%d', pageNumList(pageNumIndex))).Count);
+                        end
+                    case 'percentPageCompletedWeekday' % percent of pages completed by day of the week
+                        for pageNumIndex = 1:length(pageNumList)
+                            outputDataTablesCell.(string(tableType)).(string(currentSurvey)){pageHeaderUniqueNum}(7*(currentPhaseNameIndex-1) + queryList.pageCompletedWeekday.(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex))).(sprintf('pg%d', pageNumList(pageNumIndex))).WeekdayNum + 1, pageNumIndex + 1) = num2cell(round(10000 * queryList.pageCompletedWeekday.(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex))).(sprintf('pg%d', pageNumList(pageNumIndex))).Count / sum(queryList.pageCompletedWeekday.(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex))).(sprintf('pg%d', pageNumList(pageNumIndex))).Count)) / 100);
+                        end
                     otherwise
                         for pageNumIndex = 1:length(pageNumList)
                             outputDataTablesCell.(string(tableType)).(string(currentSurvey)){pageHeaderUniqueNum}(currentPhaseNameIndex + 1, pageNumIndex + 1) = table2cell(queryList.(string(tableType)).(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex))).(sprintf('pg%d', pageNumList(pageNumIndex))));
@@ -701,9 +807,17 @@ for currentSurvey = {'Enrollment', 'Long', 'Short'}
                 end
                 % append number of questionnaires sent as (n=####) to phase 
                 % name first column
-                currentQuestID = queryList.availablePhases.(string(currentSurvey)).data.questid{matches(queryList.availablePhases.(string(currentSurvey)).data.DatabasePrefix, outputDataTablesCell.(string(tableType)).(string(currentSurvey)){pageHeaderUniqueNum}{currentPhaseNameIndex + 1, 1})};
-                outputDataTablesCell.(string(tableType)).(string(currentSurvey)){pageHeaderUniqueNum}{currentPhaseNameIndex + 1, 1} = sprintf('%s/%s (n=%d)', outputDataTablesCell.(string(tableType)).(string(currentSurvey)){pageHeaderUniqueNum}{currentPhaseNameIndex + 1, 1}, currentQuestID, cell2mat(table2cell(queryList.questionnairesSent.(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex))))));
+                % currentQuestID = queryList.availablePhases.(string(currentSurvey)).data.questid{matches(queryList.availablePhases.(string(currentSurvey)).data.DatabasePrefix, outputDataTablesCell.(string(tableType)).(string(currentSurvey)){pageHeaderUniqueNum}{currentPhaseNameIndex + 1, 1})};
+                currentQuestID = queryList.availablePhases.(string(currentSurvey)).data.questid{matches(queryList.availablePhases.(string(currentSurvey)).data.DatabasePrefix, currentPhaseNameList{currentPhaseNameIndex})};
+                if ~contains(tableType, 'Weekday')
+                    outputDataTablesCell.(string(tableType)).(string(currentSurvey)){pageHeaderUniqueNum}(currentPhaseNameIndex + 1, 1) = {sprintf('%s/%s (n=%d)', currentPhaseNameList{currentPhaseNameIndex}, currentQuestID, cell2mat(table2cell(queryList.questionnairesSent.(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex))))))};
+                else
+                    outputDataTablesCell.(string(tableType)).(string(currentSurvey)){pageHeaderUniqueNum}(7*(currentPhaseNameIndex-1) + 2 : 7*(currentPhaseNameIndex-1) + 8, 1) = {sprintf('%s/%s (n=%d)', currentPhaseNameList{currentPhaseNameIndex}, currentQuestID, cell2mat(table2cell(queryList.questionnairesSent.(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex))))))};
+                end
             end
+            % replace empty cells in pageCompletedWeekday and 
+            % percentPageCompletedWeekday with zeros
+            outputDataTablesCell.(string(tableType)).(string(currentSurvey)){pageHeaderUniqueNum}([false(1, width(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){pageHeaderUniqueNum})); false(height(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){pageHeaderUniqueNum}) - 1, 1), cellfun(@isempty, outputDataTablesCell.(string(tableType)).(string(currentSurvey)){pageHeaderUniqueNum}(2:end, 2:end))]) = {0};
         end
     end
 end
@@ -711,7 +825,8 @@ end
 %%
 % --- Arrange the data tables into a singular table for placement into a
 % spreadsheet to be imported into Power BI ---
-tableTypeList = {'percentPageCompleted', 'pageCompleted', 'percentPageStarted', 'pageStarted', 'percentPageFinished', 'pageUnfinished'};
+tableTypeList = {'percentPageCompleted', 'pageCompleted', 'percentPageStarted', 'pageStarted', 'percentPageFinished', 'pageUnfinished', 'percentPageCompletedWeekday', 'pageCompletedWeekday'};
+weekdayList = {'Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'};
 % determine the height of the final table 
 cellHeightPowerBI = 1;
 % for tableType = tableTypeList
@@ -722,63 +837,104 @@ cellHeightPowerBI = 1;
     end
 % end
 % determine the width of the final table
-% cellWidthPowerBI = 6;
-% cellWidthPowerBI = 5;
-cellWidthPowerBI = 3 + length(tableTypeList);
+cellWidthPowerBI = 4 + length(tableTypeList);
 % initialize the big table
 outputDataBigTableCellPowerBI = cell(cellHeightPowerBI, cellWidthPowerBI);
-% insert data into big table
-% outputDataBigTableCellPowerBI(1,:) = {'SurveyName','TableType','PhaseNum','QuestID','PageName','Data'}; 
-% outputDataBigTableCellPowerBI(1,:) = {'Survey Name','Table Type','Phase (QuestID)','Page Name','Data'}; 
-outputDataBigTableCellPowerBI(1,:) = [{'Survey Name','Phase (QuestID)','Page Name'}, tableTypeList]; 
-% rowIndexPowerBI = 2;
+outputDataBigTableCellPowerBI(1,:) = [{'Survey Name','Phase (QuestID)','Page Name','Weekday'}, tableTypeList]; 
 for tableType = tableTypeList
     rowIndexPowerBI.(string(tableType)) = 2;
 end
-for currentSurvey = {'Enrollment', 'Long', 'Short'}
+% for currentSurvey = {'Enrollment', 'Long', 'Short'}
+for currentSurvey = {'Long', 'Short'}
     for tableType = tableTypeList
+        if ~any(strcmp(tableType, {'percentPageCompletedWeekday', 'pageCompletedWeekday'}))
+            for headerGroupNum = 1:length(outputDataTablesCell.(string(tableType)).(string(currentSurvey)))
+                for phaseNum = 2:height(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum})
+                    % insert survey name
+                    outputDataBigTableCellPowerBI(rowIndexPowerBI.(string(tableType)) : rowIndexPowerBI.(string(tableType)) + width(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}) - 1, matches(outputDataBigTableCellPowerBI(1,:), 'Survey Name')) = deal(currentSurvey);
+                    % insert phaseID
+                    if strcmp(currentSurvey, 'Enrollment')
+                        outputDataBigTableCellPowerBI(rowIndexPowerBI.(string(tableType)) : rowIndexPowerBI.(string(tableType)) + width(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}) - 1, matches(outputDataBigTableCellPowerBI(1,:), 'Phase (QuestID)')) = deal({sprintf('EnrollDup (%s)', string(extractBetween(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}(phaseNum, 1), '/', whitespacePattern)))});
+                    else
+                        outputDataBigTableCellPowerBI(rowIndexPowerBI.(string(tableType)) : rowIndexPowerBI.(string(tableType)) + width(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}) - 1, matches(outputDataBigTableCellPowerBI(1,:), 'Phase (QuestID)')) = deal({sprintf('%s (%s)', string(extract(extractBefore(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}(phaseNum, 1), '/'), digitsPattern)), string(extractBetween(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}(phaseNum, 1), '/', whitespacePattern)))});
+                    end
+                    % insert 'Surveys Sent' page name before adding actual page names
+                    outputDataBigTableCellPowerBI(rowIndexPowerBI.(string(tableType)), matches(outputDataBigTableCellPowerBI(1,:), 'Page Name')) = {'Surveys Sent'};
+                    % insert actual page names
+                    outputDataBigTableCellPowerBI(rowIndexPowerBI.(string(tableType)) + 1 : rowIndexPowerBI.(string(tableType)) + width(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}) - 1, matches(outputDataBigTableCellPowerBI(1,:), 'Page Name')) = outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}(1, 2:end)';
+                    % insert data  
+                    outputDataBigTableCellPowerBI(rowIndexPowerBI.(string(tableType)) : rowIndexPowerBI.(string(tableType)) + width(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}) - 1, matches(outputDataBigTableCellPowerBI(1,:), tableType)) = outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}(phaseNum, :)';
+                    % rowIndexPowerBI = rowIndexPowerBI + width(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum});
+                    rowIndexPowerBI.(string(tableType)) = rowIndexPowerBI.(string(tableType)) + width(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum});
+                end
+            end
+        end
+    end
+    
+    % - append percentPageCompletedWeekday and pageCompletedWeekday after
+    % adding the rest of the data -
+    for tableType = {'percentPageCompletedWeekday', 'pageCompletedWeekday'}
+        rowIndexPowerBI.(string(tableType)) = rowIndexPowerBI.(tableTypeList{1});
         for headerGroupNum = 1:length(outputDataTablesCell.(string(tableType)).(string(currentSurvey)))
             for phaseNum = 2:height(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum})
-                % outputDataBigTableCellPowerBI(rowIndexPowerBI : rowIndexPowerBI + width(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}) - 1, 1) = deal(currentSurvey);
-                outputDataBigTableCellPowerBI(rowIndexPowerBI.(string(tableType)) : rowIndexPowerBI.(string(tableType)) + width(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}) - 1, 1) = deal(currentSurvey);
-                % outputDataBigTableCellPowerBI(rowIndexPowerBI : rowIndexPowerBI + width(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}) - 1, 2) = deal(tableType);
+                % insert survey name
+                outputDataBigTableCellPowerBI(rowIndexPowerBI.(string(tableType)) : rowIndexPowerBI.(string(tableType)) + width(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}) - 1, matches(outputDataBigTableCellPowerBI(1,:), 'Survey Name')) = deal(currentSurvey);
+                % insert phaseID
                 if strcmp(currentSurvey, 'Enrollment')
-                    % outputDataBigTableCellPowerBI(rowIndexPowerBI : rowIndexPowerBI + width(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}) - 1, 3) = deal({'EnrollDup'});
-                    % outputDataBigTableCellPowerBI(rowIndexPowerBI : rowIndexPowerBI + width(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}) - 1, 3) = deal({sprintf('EnrollDup (%s)', string(extractBetween(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}(phaseNum, 1), '/', whitespacePattern)))});
-                    outputDataBigTableCellPowerBI(rowIndexPowerBI.(string(tableType)) : rowIndexPowerBI.(string(tableType)) + width(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}) - 1, 2) = deal({sprintf('EnrollDup (%s)', string(extractBetween(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}(phaseNum, 1), '/', whitespacePattern)))});
+                    outputDataBigTableCellPowerBI(rowIndexPowerBI.(string(tableType)) : rowIndexPowerBI.(string(tableType)) + width(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}) - 1, matches(outputDataBigTableCellPowerBI(1,:), 'Phase (QuestID)')) = deal({sprintf('EnrollDup (%s)', string(extractBetween(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}(phaseNum, 1), '/', whitespacePattern)))});
                 else
-                    % outputDataBigTableCellPowerBI(rowIndexPowerBI : rowIndexPowerBI + width(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}) - 1, 3) = deal(extract(extractBefore(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}(phaseNum, 1), '/'), digitsPattern));
-                    % outputDataBigTableCellPowerBI(rowIndexPowerBI : rowIndexPowerBI + width(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}) - 1, 3) = deal({sprintf('%s (%s)', string(extract(extractBefore(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}(phaseNum, 1), '/'), digitsPattern)), string(extractBetween(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}(phaseNum, 1), '/', whitespacePattern)))});
-                    outputDataBigTableCellPowerBI(rowIndexPowerBI.(string(tableType)) : rowIndexPowerBI.(string(tableType)) + width(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}) - 1, 2) = deal({sprintf('%s (%s)', string(extract(extractBefore(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}(phaseNum, 1), '/'), digitsPattern)), string(extractBetween(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}(phaseNum, 1), '/', whitespacePattern)))});
+                    outputDataBigTableCellPowerBI(rowIndexPowerBI.(string(tableType)) : rowIndexPowerBI.(string(tableType)) + width(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}) - 1, matches(outputDataBigTableCellPowerBI(1,:), 'Phase (QuestID)')) = deal({sprintf('%s (%s)', string(extract(extractBefore(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}(phaseNum, 1), '/'), digitsPattern)), string(extractBetween(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}(phaseNum, 1), '/', whitespacePattern)))});
                 end
-                % outputDataBigTableCellPowerBI(rowIndexPowerBI : rowIndexPowerBI + width(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}) - 1, 4) = deal(extractBetween(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}(phaseNum, 1), '/', whitespacePattern));
-                % insert the data into the big table
-                % outputDataBigTableCellPowerBI(rowIndexPowerBI, 5) = {'Page Name'};
-                % outputDataBigTableCellPowerBI(rowIndexPowerBI + 1 : rowIndexPowerBI + width(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}) - 1, 5) = outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}(1, 2:end)';
-                % outputDataBigTableCellPowerBI(rowIndexPowerBI : rowIndexPowerBI + width(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}) - 1, 6) = outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}(phaseNum, :)';
-                % outputDataBigTableCellPowerBI(rowIndexPowerBI, 4) = {'Page Name'};
-                % outputDataBigTableCellPowerBI(rowIndexPowerBI + 1 : rowIndexPowerBI + width(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}) - 1, 4) = outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}(1, 2:end)';
-                % outputDataBigTableCellPowerBI(rowIndexPowerBI : rowIndexPowerBI + width(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}) - 1, 5) = outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}(phaseNum, :)';
-                % outputDataBigTableCellPowerBI(rowIndexPowerBI.(string(tableType)), 3) = {'Page Name'};
-                outputDataBigTableCellPowerBI(rowIndexPowerBI.(string(tableType)), 3) = {'Surveys Sent'};
-                outputDataBigTableCellPowerBI(rowIndexPowerBI.(string(tableType)) + 1 : rowIndexPowerBI.(string(tableType)) + width(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}) - 1, 3) = outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}(1, 2:end)';
+                % insert 'Surveys Sent' page name before adding actual page names
+                outputDataBigTableCellPowerBI(rowIndexPowerBI.(string(tableType)), matches(outputDataBigTableCellPowerBI(1,:), 'Page Name')) = {'Surveys Sent'};
+                % insert actual page names
+                outputDataBigTableCellPowerBI(rowIndexPowerBI.(string(tableType)) + 1 : rowIndexPowerBI.(string(tableType)) + width(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}) - 1, matches(outputDataBigTableCellPowerBI(1,:), 'Page Name')) = outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}(1, 2:end)';
+                % insert data  
                 outputDataBigTableCellPowerBI(rowIndexPowerBI.(string(tableType)) : rowIndexPowerBI.(string(tableType)) + width(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}) - 1, matches(outputDataBigTableCellPowerBI(1,:), tableType)) = outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}(phaseNum, :)';
+                % insert the day of the week
+                outputDataBigTableCellPowerBI(rowIndexPowerBI.(string(tableType)) : rowIndexPowerBI.(string(tableType)) + width(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}) - 1, matches(outputDataBigTableCellPowerBI(1,:), 'Weekday')) = weekdayList(sum(matches(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}(2:phaseNum, 1), outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}(phaseNum, 1))));
                 % rowIndexPowerBI = rowIndexPowerBI + width(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum});
                 rowIndexPowerBI.(string(tableType)) = rowIndexPowerBI.(string(tableType)) + width(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum});
             end
         end
     end
+    % adjust non-weekday rowIndexPowerBI to have same value as the weekday
+    % rowIndexPowerBIs
+    for tableType = tableTypeList
+        if ~any(strcmp(tableType, {'percentPageCompletedWeekday', 'pageCompletedWeekday'}))
+            rowIndexPowerBI.(string(tableType)) = rowIndexPowerBI.percentPageCompletedWeekday;
+        end
+    end
 end
-% make tableTypeList headers in outputDataBigTableCellPowerBI pretty
+
+% - move phaseID/questID (n=####) row entries to a "Total Surveys" column -
+outputDataBigTableCellPowerBI(1, width(outputDataBigTableCellPowerBI)+1) = {'Total Surveys'};
+% check the first tableType column
+outputDataBigTableCellPowerBI([false; cellfun(@ischar, outputDataBigTableCellPowerBI(2:end, matches(outputDataBigTableCellPowerBI(1,:), tableTypeList(1))))], end) = outputDataBigTableCellPowerBI([false; cellfun(@ischar, outputDataBigTableCellPowerBI(2:end, matches(outputDataBigTableCellPowerBI(1,:), tableTypeList(1))))], matches(outputDataBigTableCellPowerBI(1,:), tableTypeList(1)));
+% check the percentPageCompletedWeekday column
+outputDataBigTableCellPowerBI([false; cellfun(@ischar, outputDataBigTableCellPowerBI(2:end, matches(outputDataBigTableCellPowerBI(1,:), 'percentPageCompletedWeekday')))], end) = outputDataBigTableCellPowerBI([false; cellfun(@ischar, outputDataBigTableCellPowerBI(2:end, matches(outputDataBigTableCellPowerBI(1,:), 'percentPageCompletedWeekday')))], matches(outputDataBigTableCellPowerBI(1,:), 'percentPageCompletedWeekday'));
+% replace cells that had survey name info with NaNs
+outputDataBigTableCellPowerBI([false; cellfun(@ischar, outputDataBigTableCellPowerBI(2:end, end))], find(matches(outputDataBigTableCellPowerBI(1,:), tableTypeList(1))):end-1) = {NaN}; 
+
+% - rename (ex. Dup88/20250101 (n=6659)) to (ex. (n=6659)) -
+outputDataBigTableCellPowerBI([false; cellfun(@ischar, outputDataBigTableCellPowerBI(2:end, end))], end) = extract(outputDataBigTableCellPowerBI([false; cellfun(@ischar, outputDataBigTableCellPowerBI(2:end, end))], end), '(n=' + digitsPattern + ')');
+
+% - replace empty cells in outputDataBigTableCellPowerBI with NaNs -
+outputDataBigTableCellPowerBI([false(1, width(outputDataBigTableCellPowerBI)); false(height(outputDataBigTableCellPowerBI) - 1, find(matches(outputDataBigTableCellPowerBI(1,:), tableTypeList(1))) - 1), cellfun(@isempty, outputDataBigTableCellPowerBI(2:end, find(matches(outputDataBigTableCellPowerBI(1,:), tableTypeList(1))):end))]) = {NaN};
+
+% - make tableTypeList headers in outputDataBigTableCellPowerBI pretty -
 outputDataBigTableCellPowerBI(1,contains(outputDataBigTableCellPowerBI(1,:), 'percent')) = join([outputDataBigTableCellPowerBI(1,contains(outputDataBigTableCellPowerBI(1,:), 'percent'))', repmat({'%'}, length(outputDataBigTableCellPowerBI(1,contains(outputDataBigTableCellPowerBI(1,:), 'percent'))), 1)], ' ')';
 outputDataBigTableCellPowerBI(1,:) = replace(outputDataBigTableCellPowerBI(1,:), {'percentPage','page'}, '');
-% zero pad all single-digit pages in Page Name (i.e., [1] -> [01])
-outputDataBigTableCellPowerBI(startsWith(outputDataBigTableCellPowerBI(:,3), '[' + digitsPattern + ']'),3) = join([repmat({'['}, sum(startsWith(outputDataBigTableCellPowerBI(:,3), '[' + digitsPattern + ']')), 1), ...
-                                                                                                                   strsplit(strtrim(sprintf('%02d ', str2double(string(extractBetween(outputDataBigTableCellPowerBI(startsWith(outputDataBigTableCellPowerBI(:,3), '[' + digitsPattern + ']'),3), '[', ']'))))))', ...
-                                                                                                                   repmat({']'}, sum(startsWith(outputDataBigTableCellPowerBI(:,3), '[' + digitsPattern + ']')), 1), ...
-                                                                                                                   extractAfter(outputDataBigTableCellPowerBI(startsWith(outputDataBigTableCellPowerBI(:,3), '[' + digitsPattern + ']'),3), '[' + digitsPattern + ']')], '');
-% rename (ex. Dup88/20250101 (n=6659)) to (ex. (n=6659))
-outputDataBigTableCellPowerBI([false; cellfun(@ischar, outputDataBigTableCellPowerBI(2:end,4))], 4:end) = repmat(extract(outputDataBigTableCellPowerBI([false; cellfun(@ischar, outputDataBigTableCellPowerBI(2:end,4))], 4), '(n=' + digitsPattern + ')'), 1, length(tableTypeList));
+
+% - zero pad all single-digit pages in Page Name (i.e., [1] -> [01]) -
+outputDataBigTableCellPowerBI(startsWith(outputDataBigTableCellPowerBI(:, matches(outputDataBigTableCellPowerBI(1,:), 'Page Name')), '[' + digitsPattern + ']'), 3) = join([repmat({'['}, sum(startsWith(outputDataBigTableCellPowerBI(:, matches(outputDataBigTableCellPowerBI(1,:), 'Page Name')), '[' + digitsPattern + ']')), 1), ...
+                                                                                                                                                                           strsplit(strtrim(sprintf('%02d ', str2double(string(extractBetween(outputDataBigTableCellPowerBI(startsWith(outputDataBigTableCellPowerBI(:, matches(outputDataBigTableCellPowerBI(1,:), 'Page Name')), '[' + digitsPattern + ']'), matches(outputDataBigTableCellPowerBI(1,:), 'Page Name')), '[', ']'))))))', ...
+                                                                                                                                                                           repmat({']'}, sum(startsWith(outputDataBigTableCellPowerBI(:, matches(outputDataBigTableCellPowerBI(1,:), 'Page Name')), '[' + digitsPattern + ']')), 1), ...
+                                                                                                                                                                           extractAfter(outputDataBigTableCellPowerBI(startsWith(outputDataBigTableCellPowerBI(:, matches(outputDataBigTableCellPowerBI(1,:), 'Page Name')), '[' + digitsPattern + ']'), matches(outputDataBigTableCellPowerBI(1,:), 'Page Name')), '[' + digitsPattern + ']')], '');
+
+
+% format all percentage values as a fracion of 1 (i.e., 69.0 -> 0.690)
+outputDataBigTableCellPowerBI(2:end, contains(outputDataBigTableCellPowerBI(1,:), '%')) = num2cell(cell2mat(outputDataBigTableCellPowerBI(2:end, contains(outputDataBigTableCellPowerBI(1,:), '%'))) / 100);
 
 %% 
 % --- Arrange the data tables into a singular table for placement into a
@@ -839,7 +995,8 @@ for currentSurvey = {'Enrollment', 'Long', 'Short'}
 end
 %%
 % --- Export data to spreadsheet for Power BI ---
-exportFileNamePowerBI = 'Dupuytrens KPI for Power BI.xlsx';
+exportFileNa
+mePowerBI = 'Dupuytrens KPI for Power BI.xlsx';
 writecell(outputDataBigTableCellPowerBI, exportFileNamePowerBI, 'Sheet', 'KPI');
 
 % --- Export data to spreadsheets for human consumption ---

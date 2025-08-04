@@ -1,0 +1,2015 @@
+% -------------------------------------------------------------------------
+% This script is designed to query Dupuytrens data for Dr. Eaton, whose
+% request is "Is there an automated way for me to see how many new 
+% enrollees there have been during each phase? To develop my enrollment 
+% and follow-up outreach efforts, I want to track the number of new 
+% enrollees and phase participants in real time to track how well my 
+% own outreach efforts are.". THIS SCRIPT ADDS THE CALCULATIONS OF THE 
+% PERCENT OF PARTICIPANTS THAT COMPLETE EACH SURVEY PAGE. 02/03/2025
+% -------------------------------------------------------------------------
+try
+
+    dbConnection = database('FORWARD', string(extractBetween(fileread('Credentials.txt'), 'username:', char(13))), string(extractAfter(fileread('Credentials.txt'), 'password:')));
+catch ME
+    if strcmp(ME.identifier, 'database:database:dataSourceNameNotFound')
+        error('dataSourceNameNotFound. To fix, launch PowerShell as admin, execute the following code, then rerun this script:\nAdd-OdbcDsn -Name ''%s'' -DriverName ''SQL Server'' -DsnType ''System'' -Platform ''64-bit'' -SetPropertyValue ''Server=10.0.100.70''', 'FORWARD')
+    else
+        rethrow(ME);
+    end
+    dbsource = "powershell;Add-OdbcDsn -Name 'FORWARD' -DriverName 'SQL Server' -DsnType 'System' -Platform '64-bit' -SetPropertyValue 'Server=10.0.100.70'";
+    system(dbsource);
+end
+
+% % --- Define common default query components ---
+% deafaultQueryComponentList.USE = 'USE Forward ';
+% deafaultQueryComponentList.SELECT = 'SELECT up.ActivityDate AS ''ActivityDate'', n.zip AS ''PostalCode'' ';
+% deafaultQueryComponentList.Select = 'SELECT up.ActivityDate AS ''ActivityDate'', n.zip AS ''PostalCode'' ';
+
+% --- Define default queries ---
+defaultQueryList.availableDatabasePrefixes.description = 'The list of Database Prefixes and their corresponding Project Name, Diagnosis Code, QuestID, PhaseID, NatalogPhase (e.g., jul24), Phase Start Date, and Phase End Date for the current project';
+defaultQueryList.availableDatabasePrefixes.query = [  'USE Forward ' ...
+                                                      'SELECT p.Name as ''Project Name'', pcc.Code as ''DiagnosisCode'', ph.DatabasePrefix, ph.questid as ''QuestID'', ph.PhaseId as ''PhaseID'', nsr.ColumnTitle as ''NatalogField'', ph.StartDate, ph.EndDate ' ...
+                                                      'FROM Project p ' ...
+                                                      'JOIN ProjectCategories pc on p.ProjectId = pc.ProjectId ' ...
+                                                      'JOIN ProjectCategory pcc on pc.ProjectCategoryId = pcc.ProjectCategoryId ' ...
+                                                      'JOIN Phase ph on ph.ProjectId = p.ProjectId ' ...
+                                                      'JOIN NatalogSurveyReference nsr on nsr.NatalogSurveyReferenceId = ph.NatalogSurveyReferenceId ' ...
+                                                      'WHERE p.ProjectId = (SELECT ProjectId FROM Forward.dbo.Project WHERE Name = ''{PROJECTNAME}'') -- where {PROJECTNAME} is the project name (e.g., NDB, Dupuytrens, PsO_Registry, etc.) --']; % PROJECTNAME is the project name (e.g., NDB, Dupuytrens, PsO_Registry, etc.)
+
+defaultQueryList.availablePhases.description = 'The list of unique survey phases and natalog phaseIDs in Dupuytrens';
+defaultQueryList.availablePhases.query = [  'USE Forward ' ...
+                                            'SELECT nsr.ColumnTitle as ''NatalogField'', DatabasePrefix, questid, StartDate, EndDate ' ...
+                                            'FROM Phase ph ' ...
+                                            'JOIN NatalogSurveyReference nsr on nsr.NatalogSurveyReferenceId = ph.NatalogSurveyReferenceId ' ...
+                                            '    AND ph.ProjectId = 46 -- 46 = Dup --' ...
+                                            'WHERE ph.DatabasePrefix like ''{SURVEYNAME}%'' -- must have {SURVEYNAME} database prefix --']; % SURVEYNAME = {'Enroll', 'Dup', 'Short'}
+
+defaultQueryList.availableTables.description = 'The list of unique survey phases and pages in Dupuytrens';
+defaultQueryList.availableTables.query = [   'USE Dupuytrens ' ...
+                                             'SELECT TABLE_NAME ' ...
+                                             '    FROM Dupuytrens.INFORMATION_SCHEMA.TABLES ' ...
+                                             '    WHERE TABLE_NAME like ''{SURVEYNAME}_pg%'' -- must have {SURVEYNAME} in table name --']; % SURVEYNAME = {'Enroll', 'Dup', 'Short'}
+
+defaultQueryList.availableTablesV2.description = 'The list of every table name for the current project';
+defaultQueryList.availableTablesV2.query = [ 'USE {PROJECTNAME} -- where {PROJECTNAME} is the project name (e.g., NDB, Dupuytrens, PsO_Registry, etc.) -- ' ...
+                                             'SELECT TABLE_NAME, TABLE_TYPE ' ...
+                                             '    FROM {PROJECTNAME}.INFORMATION_SCHEMA.TABLES ' ...
+                                             '    WHERE TABLE_NAME like ''{SURVEYNAME}_pg%'' -- must have {SURVEYNAME} in table name --']; % PROJECTNAME is the project name (e.g., NDB, Dupuytrens, PsO_Registry, etc.)
+                                                                                                                                           % SURVEYNAME = {'Enroll', 'Dup', 'Short'}
+
+defaultQueryList.pageHeaders.description = 'The list of page numbers and page titles ALONG WITH the first survey that started using that specific order of page titles and numbers';
+defaultQueryList.pageHeaders.query = [   'USE Forward ' ...
+                                         'SELECT DatabasePrefix, ''['' + CAST(PageNumber as VARCHAR(3)) + ''] '' + Pageheader as ''Page Header'' ' ...
+                                         '    FROM Page p ' ...
+                                         '    JOIN Phase ph ON ph.SurveyToolId = p.SurveyToolId -- match SurveyToolIDs between Forward.Phase and Forward.Page --' ...
+                                         '    WHERE ph.DatabasePrefix like ''{SURVEYNAME}%'' -- must have {SURVEYNAME} database prefix --' ...
+		                                 '        AND ProjectId = 46 -- specify the projectID... --' ...
+                                         '    ORDER BY ph.SurveyToolId, DatabasePrefix, p.PageNumber -- order things ahead of time, for convenience --']; % SURVEYNAME = {'Enroll', 'Dup', 'Short'}
+
+defaultQueryList.pageHeadersV2.description = 'The list of page numbers and page titles ALONG WITH the first survey that started using that specific order of page titles and numbers';
+defaultQueryList.pageHeadersV2.query = [   'USE Forward ' ...
+                                         'SELECT DatabasePrefix, ''['' + CAST(PageNumber as VARCHAR(3)) + ''] '' + Pageheader as ''Page Header'' ' ...
+                                         '    FROM Page p ' ...
+                                         '    JOIN Phase ph ON ph.SurveyToolId = p.SurveyToolId -- match SurveyToolIDs between Forward.Phase and Forward.Page --' ...
+                                         '    WHERE ph.DatabasePrefix like ''{SURVEYNAME}%'' -- must have {SURVEYNAME} database prefix --' ...
+		                                 '        AND ProjectId = 46 -- specify the projectID... --' ...
+                                         '    ORDER BY ph.SurveyToolId, DatabasePrefix, p.PageNumber -- order things ahead of time, for convenience --']; % SURVEYNAME = {'Enroll', 'Dup', 'Short'}
+
+defaultQueryList.questionnairesSent.description = 'Participants who should have completed questionnaires (i.e., the number of questionnaires sent out)';
+defaultQueryList.questionnairesSent.query = [  'USE Forward ' ...
+                                               'SELECT DISTINCT up.UserId AS ''UserID'', up.ActivityDate AS ''ActivityDate'', n.zip AS ''PostalCode'' ' ...
+	                                           'FROM UserPhase up -- grab user activity --' ...
+	                                           'JOIN Phase ph ON ph.PhaseId = up.PhaseId -- match phase IDs between Forward.Phase and Forward.UserPhase --' ...
+	                                           'JOIN Project pj ON pj.ProjectId = ph.ProjectId -- match projectIDs between Forward.Project and Forward.Phase --' ...
+	                                           'JOIN arc.dbo.Natalog n ON n.guid = up.UserId -- joining on Natalog ensures we only include participants still in the database --' ...
+	                                           'WHERE up.StatusCode = ph.SentStatus -- only keep "Sent" activity --' ...
+		                                       '    AND pj.Name = ''Dupuytrens'' -- limit UserPhase to only include the Dupuytrens Registry (aka Project) --' ...
+		                                       '    AND {SURVEYSELECT} -- limit UserPhase to only include the {SURVEYDESCRIPTION} --']; % SURVEYSELECT = {'ph.Name LIKE ''%Enrollment%''', 'ph.DatabasePrefix = ''Dup##''', 'ph.DatabasePrefix = ''Short##'''} 
+                                                                                                                                        % SURVEYDESCRIPTION = {'Dupuytrens Enrollment PhaseId', 'Dupuytrens Long Survey for ph##', 'Dupuytrens Short Survey for ph##'}
+
+defaultQueryList.questionnairesSentV2.description = 'Each row corresponds to a participant/survey combo who should have completed questionnaires (i.e., the number of questionnaires sent out). Returns UserID, ActivityDate, PostalCode, and DatabasePrefix for all participants for each survey they were sent.';
+defaultQueryList.questionnairesSentV2.query = [  'USE Forward ' ...
+                                               'SELECT DISTINCT up.UserId AS ''UserID'', up.ActivityDate AS ''ActivityDate'', n.zip AS ''PostalCode'', ph.DatabasePrefix ' ...
+	                                           'FROM UserPhase up -- grab user activity --' ...
+	                                           'JOIN Phase ph ON ph.PhaseId = up.PhaseId -- match phase IDs between Forward.Phase and Forward.UserPhase --' ...
+	                                           'JOIN Project pj ON pj.ProjectId = ph.ProjectId -- match projectIDs between Forward.Project and Forward.Phase --' ...
+	                                           'JOIN arc.dbo.Natalog n ON n.guid = up.UserId -- joining on Natalog ensures we only include participants still in the database --' ...
+	                                           'WHERE up.StatusCode = ph.SentStatus -- only keep "Sent" activity --' ...
+		                                       '    AND pj.Name = ''{PROJECTNAME}'') -- where {PROJECTNAME} is the project name (e.g., NDB, Dupuytrens, PsO_Registry, etc.) --']; % PROJECTNAME is the project name (e.g., NDB, Dupuytrens, PsO_Registry, etc.)
+
+defaultQueryList.pageStarted.description = 'Participants who started the page';
+defaultQueryList.pageStarted.query = [   'USE Forward ' ...
+                                         'SELECT DISTINCT up.UserId AS ''UserID'', up.ActivityDate AS ''ActivityDate'', n.zip AS ''PostalCode'' ' ...
+	                                     'FROM Dupuytrens.dbo.{SURVEYPAGEHEADER} q -- grab info for specific page of specific questionnaire --' ...
+                                         'JOIN UserPhase up ON q.guid = up.UserId -- match userIDs between Dupuytrens.dbo.{SURVEYPAGEHEADER} and Forward.UserPhase --' ...
+	                                     'JOIN Phase ph ON ph.PhaseId = up.PhaseId -- match phase IDs between Forward.Phase and Forward.UserPhase --' ...
+	                                     'JOIN Project pj ON pj.ProjectId = ph.ProjectId -- match projectIDs between Forward.Project and Forward.Phase --' ...
+	                                     'JOIN arc.dbo.Natalog n ON n.guid = up.UserId -- joining on Natalog ensures we only include participants still in the database --' ...
+	                                     'WHERE up.StatusCode = ph.SentStatus -- only keep "Sent" activity --' ...
+		                                 '    AND pj.Name = ''Dupuytrens'' -- limit UserPhase to only include the Dupuytrens Registry (aka Project) --' ...
+		                                 '    AND {SURVEYSELECT} -- limit UserPhase to only include the {SURVEYDESCRIPTION} --']; % SURVEYPAGEHEADER = sprintf('%s_pg%d', {'EnrollDup', 'Dup##', 'Short##'}, pageNum (EXCEPT ONE PAGE IS 'pgDrug'))
+                                                                                                                                  % SURVEYSELECT = {'ph.Name LIKE ''%Enrollment%''', 'ph.DatabasePrefix = ''Dup##''', 'ph.DatabasePrefix = ''Short##'''} 
+                                                                                                                                  % SURVEYDESCRIPTION = {'Dupuytrens Enrollment PhaseId', 'Dupuytrens Long Survey for ph##', 'Dupuytrens Short Survey for ph##'}
+                                                                                                                                  % NATALOGPHASEID = whichever natalog phase id matches the current survey (e.g., jul24 for Dup87). natalog phase id and survey names can be found in queryList.availablePhases.(string(currentSurvey)).data
+
+defaultQueryList.pageCompleted.description = 'Participants who completed the page';
+defaultQueryList.pageCompleted.query = [ 'USE Forward ' ...
+                                         'SELECT DISTINCT up.UserId AS ''UserID'', up.ActivityDate AS ''ActivityDate'', n.zip AS ''PostalCode'' ' ...
+	                                     'FROM Dupuytrens.dbo.{SURVEYPAGEHEADER} q -- grab info for specific page of specific questionnaire --' ...
+                                         'JOIN UserPhase up ON q.guid = up.UserId -- match userIDs between Dupuytrens.dbo.{SURVEYPAGEHEADER} and Forward.UserPhase --' ...
+	                                     'JOIN Phase ph ON ph.PhaseId = up.PhaseId -- match phase IDs between Forward.Phase and Forward.UserPhase --' ...
+	                                     'JOIN Project pj ON pj.ProjectId = ph.ProjectId -- match projectIDs between Forward.Project and Forward.Phase --' ...
+	                                     'JOIN arc.dbo.Natalog n ON n.guid = up.UserId -- joining on Natalog ensures we only include participants still in the database --' ...
+	                                     'WHERE up.StatusCode = ph.SentStatus -- only keep "Sent" activity --' ...
+		                                 '    AND pj.Name = ''Dupuytrens'' -- limit UserPhase to only include the Dupuytrens Registry (aka Project) --' ...
+		                                 '    AND {SURVEYSELECT} -- limit UserPhase to only include the {SURVEYDESCRIPTION} --', ...
+                                         '    AND {NATALOGPHASEID} = ph.CompleteStatus']; % SURVEYPAGEHEADER = sprintf('%s_pg%d', {'EnrollDup', 'Dup##', 'Short##'}, pageNum (EXCEPT ONE PAGE IS 'pgDrug'))
+                                                                                          % SURVEYSELECT = {'ph.Name LIKE ''%Enrollment%''', 'ph.DatabasePrefix = ''Dup##''', 'ph.DatabasePrefix = ''Short##'''} 
+                                                                                          % SURVEYDESCRIPTION = {'Dupuytrens Enrollment PhaseId', 'Dupuytrens Long Survey for ph##', 'Dupuytrens Short Survey for ph##'}      
+                                                                                          % NATALOGPHASEID = whichever natalog phase id matches the current survey (e.g., jul24 for Dup87). natalog phase id and survey names can be found in queryList.availablePhases.(string(currentSurvey)).data
+
+defaultQueryList.pageUnfinished.description = 'Participants who didn''t complete the page';
+defaultQueryList.pageUnfinished.query = [   'USE Forward ' ...
+                                            'SELECT DISTINCT up.UserId AS ''UserID'', up.ActivityDate AS ''ActivityDate'', n.zip AS ''PostalCode'' ' ...
+	                                        'FROM Dupuytrens.dbo.{SURVEYPAGEHEADER} q -- grab info for specific page of specific questionnaire --' ...
+                                            'JOIN UserPhase up ON q.guid = up.UserId -- match userIDs between Dupuytrens.dbo.{SURVEYPAGEHEADER} and Forward.UserPhase --' ...
+	                                        'JOIN Phase ph ON ph.PhaseId = up.PhaseId -- match phase IDs between Forward.Phase and Forward.UserPhase --' ...
+	                                        'JOIN Project pj ON pj.ProjectId = ph.ProjectId -- match projectIDs between Forward.Project and Forward.Phase --' ...
+	                                        'JOIN arc.dbo.Natalog n ON n.guid = up.UserId -- joining on Natalog ensures we only include participants still in the database --' ...
+	                                        'WHERE up.StatusCode = ph.SentStatus -- only keep "Sent" activity --' ...
+		                                    '    AND pj.Name = ''Dupuytrens'' -- limit UserPhase to only include the Dupuytrens Registry (aka Project) --' ...
+		                                    '    AND {SURVEYSELECT} -- limit UserPhase to only include the {SURVEYDESCRIPTION} --'...
+                                            '    AND {NATALOGPHASEID} = ph.StartedStatus']; % SURVEYPAGEHEADER = sprintf('%s_pg%d', {'EnrollDup', 'Dup##', 'Short##'}, pageNum (EXCEPT ONE PAGE IS 'pgDrug'))
+                                                                                            % SURVEYSELECT = {'ph.Name LIKE ''%Enrollment%''', 'ph.DatabasePrefix = ''Dup##''', 'ph.DatabasePrefix = ''Short##'''} 
+                                                                                            % SURVEYDESCRIPTION = {'Dupuytrens Enrollment PhaseId', 'Dupuytrens Long Survey for ph##', 'Dupuytrens Short Survey for ph##'}
+                                                                                            % NATALOGPHASEID = whichever natalog phase id matches the current survey (e.g., jul24 for Dup87). natalog phase id and survey names can be found in queryList.availablePhases.(string(currentSurvey)).data
+%%
+defaultQueryList.projectDatabaseInfo.description = 'This query returns table and phase info for a specific project. Replaces availablePhases, availableTables, and pageHeaders queries.';
+defaultQueryList.projectDatabaseInfo.query = [  'USE Forward ' ...
+                                                'SELECT DISTINCT ' ...
+	                                            'pj.Name as ''Project Name'', pcc.Code as ''Diagnosis Code'', ph.DatabasePrefix, ' ...
+                                                'pj.Name + ''.dbo.'' + ph.DatabasePrefix + ''_'' + ' ...
+                                                'CASE ' ...
+                                                '    WHEN s.SectionTypeId = 5 THEN ''pgDrug'' ' ...
+                                                '    ELSE ''pg'' + CAST(p.PageNumber as VARCHAR(3)) ' ...
+                                                'END AS ''Page Table'', ' ...
+                                                'ph.DatabasePrefix + ''_'' + CASE ' ... 
+                                                '    WHEN s.SectionTypeId = 5 THEN ''pgDrug'' ' ...
+                                                '    ELSE ''pg'' + CAST(p.PageNumber as VARCHAR(3)) ' ...
+                                                'END as ''Table Name'', ''['' + CAST(PageNumber as VARCHAR(3)) + ''] '' + Pageheader as ''Page Header'', p.PageNumber, ph.questid, ph.PhaseId as ''PhaseID'', nsr.ColumnTitle as ''Phase Status'', ph.Name as ''Phase Name'', ph.StartDate, ph.EndDate, ph.InviteStatus, ph.SentStatus, ph.StartedStatus, ph.CompleteStatus ' ...
+                                                'FROM Forward.dbo.Phase ph ' ...
+                                                'JOIN Forward.dbo.Project pj ON pj.ProjectId = ph.ProjectId ' ...
+                                                'JOIN Forward.dbo.Page p ON p.SurveyToolId = ph.SurveyToolId ' ...
+                                                'JOIN Forward.dbo.Section s ON s.PageId = p.PageId ' ...
+	                                            'JOIN ProjectCategories pc on pj.ProjectId = pc.ProjectId ' ...
+	                                            'JOIN ProjectCategory pcc on pc.ProjectCategoryId = pcc.ProjectCategoryId ' ...
+	                                            'JOIN NatalogSurveyReference nsr on nsr.NatalogSurveyReferenceId = ph.NatalogSurveyReferenceId ' ...
+                                                'WHERE pj.ProjectId = (SELECT ProjectId FROM Forward.dbo.Project WHERE Name = ''{PROJECTNAME}'') -- where {PROJECTNAME} is the project name (e.g., NDB, Dupuytrens, PsO_Registry, etc.) --']; % PROJECTNAME is the project name (e.g., NDB, Dupuytrens, PsO_Registry, etc.)
+
+defaultQueryList.questionnairesSentV2.description = 'Each row corresponds to a participant/survey combo who should have completed questionnaires (i.e., the number of questionnaires sent out). Returns UserID, ActivityDate, PostalCode, and DatabasePrefix for all participants for each survey they were sent.';
+defaultQueryList.questionnairesSentV2.query = ['USE Forward ' ...
+                                               'DROP TABLE IF EXISTS #questionnairesSentV2 ' ...
+                                               'CREATE TABLE #questionnairesSentV2 ( ' ...
+	                                           '       UserID VARCHAR(MAX), PostalCode VARCHAR(MAX), StateAbbr VARCHAR(MAX), CountryCode INT, DatabasePrefix VARCHAR(MAX) ' ...
+                                               '); ' ...
+                                               ' ' ...
+                                               'INSERT INTO #questionnairesSentV2 ' ...
+                                               'SELECT DISTINCT up.UserId AS ''UserID'', n.zip AS ''PostalCode'', n.state AS ''StateAbbr'', n.country AS ''CountryCode'', ph.DatabasePrefix ' ...
+	                                           'FROM UserPhase up -- grab user activity -- ' ...
+	                                           'JOIN Phase ph ON ph.PhaseId = up.PhaseId -- match phase IDs between Forward.Phase and Forward.UserPhase -- ' ...
+	                                           'JOIN Project pj ON pj.ProjectId = ph.ProjectId -- match projectIDs between Forward.Project and Forward.Phase -- ' ...
+	                                           'JOIN arc.dbo.Natalog n ON n.guid = up.UserId -- joining on Natalog ensures we only include participants still in the database -- ' ...
+	                                           'WHERE up.StatusCode = ph.SentStatus -- only keep "Sent" activity -- ' ...
+		                                       '    AND pj.ProjectId = (SELECT ProjectId FROM Forward.dbo.Project WHERE Name = ''{PROJECTNAME}'') -- where {PROJECTNAME} is the project name (e.g., NDB, Dupuytrens, PsO_Registry, etc.) -- ' ...
+                                               'SELECT * ' ...
+                                               'FROM #questionnairesSentV2']; % PROJECTNAME is the project name (e.g., NDB, Dupuytrens, PsO_Registry, etc.)
+
+defaultQueryList.pageData.description = 'Query that returns page-level patient IDs, postal codes, database prefixes, survey statuses, and last activity dates for each survey in a project';
+defaultQueryList.pageData.query = [ 'USE Forward; ' ...
+                                    'DROP TABLE IF EXISTS #pageQueryResults ' ...
+                                    'CREATE TABLE #pageQueryResults ( ' ...
+	                                '       DatabasePrefix VARCHAR(MAX), PageNum VARCHAR(10), UserID VARCHAR(MAX), LastActivityDate DATETIME, SurveyStatus INT, PostalCode VARCHAR(40), StateAbbr VARCHAR(40), CountryCode INT ' ...
+                                    '); ' ...
+                                    ' ' ...
+                                    'DROP TABLE IF EXISTS #pageDataFull ' ...
+                                    'CREATE TABLE #pageDataFull ( ' ...
+	                                '       DatabasePrefix VARCHAR(MAX), PageNum VARCHAR(10), UserID VARCHAR(MAX), LastActivityDate DATETIME, SurveyStatus INT, PostalCode VARCHAR(40), StateAbbr VARCHAR(40), CountryCode INT ' ...
+                                    '); ' ...
+                                    ' ' ...
+                                    'DECLARE @currentTableName varchar(max) = ''''; ' ...
+                                    'DECLARE @currentTableNameShort varchar(max) = ''''; ' ...
+                                    'DECLARE @currentPageNum INT; ' ...
+                                    'DECLARE @currentPhaseStatus varchar(max) = ''''; ' ...
+                                    'DECLARE @currentDatabasePrefix varchar(max) = ''''; ' ...
+                                    'DECLARE @sql varchar(max) = ''''; ' ...
+                                    '-- Generate a list of page table names, their page numbers, their phase statuses, and their database prefixes for the current project. These will be used to dynamically query page tables. -- ' ...
+                                    'DECLARE tableListCursor CURSOR FOR SELECT DISTINCT ' ...
+	                                '    pj.Name + ''.dbo.'' + ph.DatabasePrefix + ''_'' + ' ...
+                                    '    CASE  ' ...
+                                    '        WHEN s.SectionTypeId = 5 THEN ''pgDrug'' ' ...
+                                    '        ELSE ''pg'' + CAST(p.PageNumber as VARCHAR(3)) ' ...
+                                    '    END AS ''PageTable'', ' ...
+	                                '    ph.DatabasePrefix + ''_'' + CASE ' ...
+                                    '        WHEN s.SectionTypeId = 5 THEN ''pgDrug'' ' ...
+                                    '        ELSE ''pg'' + CAST(p.PageNumber as VARCHAR(3)) ' ...
+                                    '    END as ''TableName'', ph.DatabasePrefix, p.PageNumber, nsr.ColumnTitle as ''PhaseStatus'' ' ...
+                                    '    FROM Forward.dbo.Phase ph ' ...
+                                    '    JOIN Forward.dbo.Project pj ON pj.ProjectId = ph.ProjectId ' ...
+                                    '    JOIN Forward.dbo.Page p ON p.SurveyToolId = ph.SurveyToolId ' ...
+                                    '    JOIN Forward.dbo.Section s ON s.PageId = p.PageId ' ...
+	                                '    JOIN ProjectCategories pc on pj.ProjectId = pc.ProjectId ' ...
+	                                '    JOIN ProjectCategory pcc on pc.ProjectCategoryId = pcc.ProjectCategoryId ' ...
+	                                '    JOIN NatalogSurveyReference nsr on nsr.NatalogSurveyReferenceId = ph.NatalogSurveyReferenceId ' ...
+                                    '    WHERE pj.ProjectId = (SELECT ProjectId FROM Forward.dbo.Project WHERE Name = ''{PROJECTNAME}'') ' ...
+                                    '        AND pcc.Code = ''{DIAGNOSISCODE}'' ' ...
+                                    '    ORDER BY p.PageNumber; ' ...
+                                    'OPEN tableListCursor; ' ...
+                                    'FETCH NEXT FROM tableListCursor INTO @currentTableName, @currentTableNameShort, @currentDatabasePrefix, @currentPageNum, @currentPhaseStatus; ' ...
+                                    'WHILE @@FETCH_STATUS = 0 ' ...
+                                    'BEGIN ' ...
+	                                '    -- pageQuery into #pageQueryResults: Retrieve all the rows for the current page table, which contain UserID (from page table), LastActivityDate (from page table), SurveyStatus (from Natalog via e.g. "n.jan21"), and PostalCode, StateAbbr, and CountryCode (from Natalog) -- ' ...  
+	                                '    SET @sql = N'' ' ...
+		                            '        WITH pageQuery AS (SELECT q.GUID as '' + QUOTENAME(''UserID'') + '', q.Date as '' + QUOTENAME(''LastActivityDate'') + '', n.'' + @currentPhaseStatus + '' as '' + QUOTENAME(''SurveyStatus'') + '', n.zip as '' + QUOTENAME(''PostalCode'') + '', n.state as '' + QUOTENAME(''StateAbbr'') + '', n.country as '' + QUOTENAME(''CountryCode'') + '' '  ...
+						            '                           FROM '' + @currentTableName + '' q ' ...
+						            '                           JOIN arc.dbo.Natalog n ON q.guid = n.guid) ' ... 
+                                    ' ' ...
+		                            '        INSERT INTO #pageQueryResults (UserID, LastActivityDate, SurveyStatus, PostalCode, StateAbbr, CountryCode) ' ...
+		                            '        SELECT UserID, LastActivityDate, SurveyStatus, PostalCode, StateAbbr, CountryCode ' ...
+		                            '        FROM pageQuery''; ' ...
+	                                '    EXEC(@sql); ' ...
+                                    ' ' ...
+	                                '    -- pageDataFullQuery: Add @currentDatabasePrefix and either "pg0#" or "pg##" to the page table results from #pageQueryResults -- ' ...  
+	                                '    WITH pageDataFullQuery AS (SELECT @currentDatabasePrefix AS ''DatabasePrefixVar'', ' ... 
+							 		'                                      ''pg'' + CASE WHEN @currentPageNum > 9 THEN CAST(@currentPageNum AS VARCHAR(3)) ELSE ''0'' + CAST(@currentPageNum AS VARCHAR(3)) END as ''PageNumber'', ' ... 
+									'                                      pqr.UserID, pqr.LastActivityDate, pqr.SurveyStatus, pqr.PostalCode, pqr.StateAbbr, pqr.CountryCode FROM #pageQueryResults pqr) ' ...
+                                    ' ' ...
+	                                '    INSERT INTO #pageDataFull (DatabasePrefix, PageNum, UserID, LastActivityDate, SurveyStatus, PostalCode, StateAbbr, CountryCode) ' ...
+	                                '    SELECT * ' ...
+	                                '    FROM pageDataFullQuery ' ...
+                                    ' ' ...
+	                                '    -- Clear #pageQueryResults, so #pageQueryResults does not get appended to itself resulting in exponential duplication of its data -- ' ...
+	                                '    DELETE FROM #pageQueryResults ' ...
+                                    ' ' ...
+	                                '    FETCH NEXT FROM tableListCursor INTO @currentTableName, @currentTableNameShort, @currentDatabasePrefix, @currentPageNum, @currentPhaseStatus; ' ...
+                                    'END ' ...
+                                    'CLOSE tableListCursor; ' ...
+                                    'DEALLOCATE tableListCursor; ' ...
+                                    'DROP TABLE IF EXISTS #pageDataFinal ' ...
+                                    'CREATE TABLE #pageDataFinal ( ' ...
+	                                '       {PAGELIST_V4} ' ...
+                                    '); ' ...
+                                    ' ' ...
+                                    'INSERT INTO #pageDataFinal ' ...
+                                    'SELECT pdfss.UserID, pdfss.PostalCode, pdfss.StateAbbr, pdfss.CountryCode, pdfss.DatabasePrefix, ' ... 
+	                                '       {PAGELIST_V3} ' ...
+                                    'FROM (  -- Create a table that pivots on the survey status (i.e., columns include DatabasePrefix, UserID, PostalCode, StateAbbr, CountryCode, pg01, pg02, pg03, ... where pg## stores the SurveyStatus field for pg##) -- ' ...
+	                                '        SELECT DatabasePrefix, UserID, MAX(PostalCode) AS ''PostalCode'', MAX(StateAbbr) AS ''StateAbbr'', MAX(CountryCode) AS ''CountryCode'', ' ... 
+		                            '        {PAGELIST_V2} ' ...
+		                            '        FROM (SELECT * ' ...
+				                    '              FROM #pageDataFull ' ...
+				                    '              PIVOT (MAX(SurveyStatus) ' ...
+					                '                     FOR PageNum IN ({PAGELIST_V1}) ' ...
+					                '                    ) AS pageDataFullPivot ' ...
+				                    '              ) pdfss_pre ' ...
+		                            '        GROUP BY DatabasePrefix, UserID ' ...
+	                                '    ) pdfss ' ...
+                                    'JOIN ( ' ...
+	                                '      SELECT * ' ...
+  	                                '      FROM #pageDataFull ' ...
+	                                '      PIVOT (MAX(LastActivityDate) ' ...
+	                                '             FOR PageNum IN ({PAGELIST_V1}) ' ...
+	                                '            ) AS pageDataFullPivot) pdflad ON pdfss.UserID = pdflad.UserID ' ... 
+									'                                    AND pdfss.DatabasePrefix = pdflad.DatabasePrefix ' ...
+                                    'ORDER BY UserID, DatabasePrefix ' ...
+                                    'DECLARE @comparisonDate AS DATE = GETDATE(); ' ...
+                                    'SELECT pdf.*, (CASE WHEN DATEDIFF (DAY, up.ActivityDate, @comparisonDate) <= 7 AND up.StatusCode LIKE ''%%9'' THEN 1 ELSE 0 END) AS SurveyStartedWithinWeek ' ...
+                                    'FROM #pageDataFinal pdf ' ...
+                                    'JOIN Phase ph ON ph.DatabasePrefix = pdf.DatabasePrefix ' ...
+                                    'JOIN UserPhase up ON ph.PhaseId = up.PhaseId AND pdf.UserID = up.UserId ' ...
+                                    'JOIN AspNetUsers a ON a.Id = up.UserId'];    % PROJECTNAME is the project name (e.g., NDB, Dupuytrens, PsO_Registry, etc.)]
+                                                                        % DIAGNOSISCODE is the diagnosis name (e.g., DUP, PSOR, AOSD, GOUT, etc.)  
+                                                                        %-- {DATABASEPREFIXNAME} is the name of the current database prefix (e.g., Dup80, EnrollDup, Short82, etc.) 
+                                                                        % PAGELIST_V1 is the simple list of page numbers that is used in defining the initial pivots in pageData (e.g., "pg01,pg02,pg03,..."). The final page corresponds to the highest page number of all the surveys for the current project. 
+                                                                        % PAGELIST_V2 is the list of pages that is used in defining the pivot columns for the SurveyStatus pivot columns in pdfss (e.g., "MAX(pg01) AS 'pg01', MAX(pg02) AS 'pg02', MAX(pg03) AS 'pg03', ..."). The final page corresponds to the highest page number of all the surveys for the current project.  
+                                                                        % PAGELIST_V3 is the list of pages that is used in defining the names/orders of the final pivot columns for the final pageData query (e.g., "pdfss.pg01 AS 'pg01_SurveyStatus', pdflad.pg01 AS 'pg01_LastActivityDate', pdfss.pg02 AS 'pg02_SurveyStatus', pdflad.pg02 AS 'pg02_LastActivityDate', ..."). The final page corresponds to the highest page number of all the surveys for the current project.  
+                                                                        % PAGELIST_V4 is the list of pages that is used in initializing the columns of #pageDataFinal (e.g., "UserID VARCHAR(MAX), PostalCode VARCHAR(20), DatabasePrefix VARCHAR(MAX), pg01_SurveyStatus INT, pg01_LastActivityDate DATETIME, pg02_SurveyStatus INT, pg02_LastActivityDate DATETIME, ..."). The final page corresponds to the highest page number of all the surveys for the current project.                
+% NOTE ON pageData LAYOUT:
+%       rows: Each row will correspond to a SINGLE patient/survey combo (i.e., the
+%           number of rows will be initialized to the same number of rows as questionnairesSentV2)
+%       columns: 
+%           UserId [UserID]
+%           Postal Code [PostalCode]
+%           Database Prefix [DatabasePrefix]
+%           The following five columns for each page of the survey with 
+%           the max number of pages. (i.e., for the Dupuytrens project,
+%           since Dup80 has the most pages of any survey at 24, there would
+%           be 24 sets of these five columns (e.g., 123 columns for the whole table).
+%           For rows corresponding to surveys with less than 24 pages, they
+%           will only use the number of columns they need. (e.g, EnrollDup 
+%           only has 6 pages, so it will only use columns 1-33)
+%               Page ## [pg##]: will contain true/false to indicate that the patient participated in that survey (i.e., did patient start Dup81 survey?) 
+%               Page Started Status [pgStarted]: will contain a
+%                   true/false indicating if the page was started.
+%               Page Completed Status [pgCompleted]: will contain a
+%                   true/false indicating if the page was completed.
+%               Page Start Datetime [pgStartDate]: will contain the date the page for the survey was started. This value is retrieved
+%                   from the Date column in {PROJECTNAME}.dbo.{DatabasePrefix}_pg## (e.g., Dupuytrens.dbo.Dup80_pg5)
+%               Page End Datetime [pgEndDate]: will contain the date the page
+%                   for the survey was completed. This value is retrieved from
+%                   the {COLUMNTITLE (e.g., jan21, jun24)}recd column in the
+%                   Natalog table. WILL BE NULL IF PAGE WASN'T COMPLETED.
+
+defaultQueryList.demographics.description = 'Each row corresponds to a participant. Returns useful demographics for all participants.';
+defaultQueryList.demographics.query = ['USE arc; ' ...
+                                       'SELECT * ' ...
+                                       'FROM vDashboardDemographics'];
+% demographics var info:
+%   -UserID: natalog.GUID
+%   -DOB: date of birth; natalog.dob
+%   -Sex: 0=female, 1=male; natalog.sex
+%   -Gender: 0=female, 1=male, 2=non-conforming, 3=other; fixed.genderid
+%   -Ethnicity: 1=white, 2-7=not white; natalog.ethnic
+%   -EducationLevel: #=# of years of school; natalog.edlevel
+%   -ICQSource: initial contact source code 
+%   -ICSSourceVLabel: initial contact source label
+%   -DiagnosisCode: diagnosis code; natalog.diagnosis
+%   -ProjectName: the project that the participant is enrolled in
+%   -DupuytrensStatus: 0=have DUP diagnosis, but are control; 1=have DUP diagnosis, and actually have DUP
+
+%% 
+% --- Retrieve demographics data ---
+
+queryList.demographics = struct;
+queryList.demographics = evalQueryBig(queryList.demographics, ...
+                                     'Demographics Data', ...
+                                     defaultQueryList.demographics.description, ...
+                                     {'UserID','DOB','Sex','Gender','Ethnicity','EducationLevel','ICQSource','ICSSourceVLabel','DiagnosisCode','ProjectName','DupuytrensStatus'}, ...
+                                     defaultQueryList.demographics.query);
+
+%%
+% --- Implement the primary scipt below. Unlike the previous iterations of
+% the script (which evaluate all the surveys of interest at each step of
+% the process), this iteration completes all steps of the process for a
+% single DIAGNOSIS for a PROJECT at a time. ---
+
+projectList = {'Dupuytrens'}; % {'Dupuytrens','PsO_Registry','NDB'}
+
+% load zip code key
+warning off
+zipRawTable = readtable('ZIP_Locale_Detail.xls');
+warning on
+% find list of unique 3-digit zips and their corresponding states
+% uniqueStateList = [unique(zipRawTable.PHYSICALSTATE); {'International'}];
+uniqueStateList = unique(zipRawTable.PHYSICALSTATE);
+officialTerritoryList = {'AS','FM','GU','MH','MP','PR','PW','VI'};
+officialStateList = uniqueStateList(~matches(uniqueStateList, officialTerritoryList));
+
+tableTypeList = {'percentPageCompleted', 'pageCompleted', 'percentPageStarted', 'pageStarted', 'percentPageUnfinished', 'pageUnfinished'};
+tableTypeListStatuses.Completed = {'CompleteStatus'};
+tableTypeListStatuses.Started = {'CompleteStatus', 'StartedStatus'};
+tableTypeListStatuses.Unfinished = {'StartedStatus'};
+variationTypeList = {'Standard','Weekday','PostalState'};
+weekdayList = {'Sunday', 'Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'};
+
+%%
+for currentProject = projectList
+    % retrieve the list of phase and survey info for the current project
+    queryList.projectDatabaseInfo.(string(currentProject)) = struct;
+    queryList.projectDatabaseInfo.(string(currentProject)) = evalQuery(queryList.projectDatabaseInfo.(string(currentProject)), ...
+                                                                      sprintf('%s: ProjectDatabaseInfo', string(currentProject)), ...
+                                                                      defaultQueryList.projectDatabaseInfo.description, ...
+                                                                      strrep(defaultQueryList.projectDatabaseInfo.query, '{PROJECTNAME}', string(currentProject)), ...
+                                                                      dbConnection);
+    % sort projectDatabaseInfo by PageNumber then by DatabasePrefix
+    queryList.projectDatabaseInfo.(string(currentProject)).data = sortrows(queryList.projectDatabaseInfo.(string(currentProject)).data,"PageNumber","ascend");
+    queryList.projectDatabaseInfo.(string(currentProject)).data = sortrows(queryList.projectDatabaseInfo.(string(currentProject)).data,"DatabasePrefix","ascend");
+    
+    % determine the number of pages in the survey with the most pages
+    numPages.(string(currentProject)) = max(queryList.projectDatabaseInfo.(string(currentProject)).data.PageNumber);
+    % generate the pageList parameters for the pageData query
+    pageListV1 = join(join([repmat({'pg'}, numPages.(string(currentProject)), 1), split(strtrim(sprintf('%02d ', 1:numPages.(string(currentProject)))), ' ')], '')', ',');
+    pageListV2 = strrep(strrep(strtrim(sprintf('MAX(%s)!AS!''%s'' ', string(repmat(join([repmat({'pg'}, numPages.(string(currentProject)), 1), split(strtrim(sprintf('%02d ', 1:numPages.(string(currentProject)))), ' ')], ''), 1, 2)'))), ' ', ', '), '!', ' ');
+    pageListV3 = strrep(strrep(strtrim(sprintf('pdfss.%s!AS!''%s_SurveyStatus'',!pdflad.%s!AS!''%s_LastActivityDate'' ', string(repmat(join([repmat({'pg'}, numPages.(string(currentProject)), 1), split(strtrim(sprintf('%02d ', 1:numPages.(string(currentProject)))), ' ')], ''), 1, 4)'))), ' ', ', '), '!', ' ');
+    pageListV4 = ['UserID VARCHAR(MAX), PostalCode VARCHAR(40), StateAbbr VARCHAR(40), CountryCode INT, DatabasePrefix VARCHAR(MAX), ', strrep(strrep(strtrim(sprintf('%s_SurveyStatus!INT,!%s_LastActivityDate!DATETIME ', string(repmat(join([repmat({'pg'}, numPages.(string(currentProject)), 1), split(strtrim(sprintf('%02d ', 1:numPages.(string(currentProject)))), ' ')], ''), 1, 2)'))), ' ', ', '), '!', ' ')];
+
+    
+    
+    for currentDiagnosisCode = unique(queryList.projectDatabaseInfo.(string(currentProject)).data.DiagnosisCode)'
+        % - Query questionnairesSent and pageData -
+        queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)) = struct;
+        queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)) = evalQueryBig(queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)), ...
+                                                                         sprintf('%s - %s: Sent Surveys', string(currentProject), string(currentDiagnosisCode)), ...
+                                                                         defaultQueryList.questionnairesSentV2.description, ...
+                                                                         {'UserID', 'PostalCode', 'StateAbbr','CountryCode', 'DatabasePrefix'}, ...
+                                                                         strrep(defaultQueryList.questionnairesSentV2.query, '{PROJECTNAME}', string(currentProject)));
+        queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)) = struct;
+        queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)) = evalQueryBig(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)), ...
+                                                                         sprintf('%s - %s: Page Data', string(currentProject), string(currentDiagnosisCode)), ...
+                                                                         defaultQueryList.pageData.description, ...
+                                                                         split(['UserID, PostalCode, StateAbbr, CountryCode, DatabasePrefix', strrep(strrep(strtrim(sprintf(',!%s_SurveyStatus,!%s_LastActivityDate', string(repmat(join([repmat({'pg'}, numPages.(string(currentProject)), 1), split(strtrim(sprintf('%02d ', 1:numPages.(string(currentProject)))), ' ')], ''), 1, 2)'))), ' ', ', '), '!', ' ')], ', ')', ...
+                                                                         strrep(strrep(strrep(strrep(strrep(strrep(defaultQueryList.pageData.query, '{PROJECTNAME}', currentProject), '{DIAGNOSISCODE}', currentDiagnosisCode), '{PAGELIST_V1}', pageListV1), '{PAGELIST_V2}', pageListV2), '{PAGELIST_V3}', pageListV3), '{PAGELIST_V4}', pageListV4));
+        
+        % - Replace each postal code (if a US Zip Code) with the state abbreviation -
+        fprintf('Replacing postal codes with state abbreviations...\n');
+        tic
+        % questionnairesSent (use UserID to lookup pageData PostalStateCodes) 
+        queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalCode = cellstr(string(queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalCode)); % format all PostalCodes as strings 
+        queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data.StateAbbr(cellfun(@all, cellfun(@ismissing, queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data.StateAbbr, 'UniformOutput', false))) = {'NULL'}; % replace all missing entries of StateAbbr with NULL
+        queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data = addvars(queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data, cell(height(queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data), 1), 'Before', 'PostalCode', 'NewVariableNames', 'PostalStateCode');
+        queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalStateCode(queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data.CountryCode ~= 0) = {'International'}; % records where country is not USA = 'International'
+        queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalStateCode((queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data.CountryCode == 0) & matches(queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data.StateAbbr, officialTerritoryList)) = {'USA_Territory'}; % records where country is USA AND state is on officialTerritoryList = 'USA_Territory'
+        queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalStateCode((queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data.CountryCode == 0) & matches(queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data.StateAbbr, officialStateList)) = queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data.StateAbbr((queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data.CountryCode == 0) & matches(queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data.StateAbbr, officialStateList)); % records where country is USA AND state is on officialStateList = whatever the state is for that record
+        queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalStateCode(cellfun(@isempty, queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalStateCode) & matches(queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalCode, digitsPattern(5))) = replace(queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalCode(cellfun(@isempty, queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalStateCode) & matches(queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalCode, digitsPattern(5))), zipRawTable.DELIVERYZIPCODE, zipRawTable.PHYSICALSTATE); % of the remaining unassigned records, if PostalCode is 5 digits, lookup state using post office zip data 
+        queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalStateCode(cellfun(@isempty, queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalStateCode) & matches(queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalCode, digitsPattern(5) + '-' + digitsPattern(4))) = replace(extractBefore(queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalCode(cellfun(@isempty, queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalStateCode) & matches(queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalCode, digitsPattern(5) + '-' + digitsPattern(4))), '-'), zipRawTable.DELIVERYZIPCODE, zipRawTable.PHYSICALSTATE); % of the remaining unassigned records, if PostalCode is '#####-####', lookup state using post office zip data 
+        queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalStateCode(cellfun(@isempty, queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalStateCode) & ~matches(queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data.StateAbbr, {char(0), 'NULL'})) = {'International'}; % remaining unassigned records with text in StateAbbr that isn't blank or NULL = 'International'
+        queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalStateCode(cellfun(@isempty, queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalStateCode)) = {'UNKNOWN'}; % all remaining unassigned records are given the status of unknown
+        queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalStateCode(~matches(queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalStateCode, [officialStateList; {'UNKNOWN'; 'USA_Territory'; 'International'}])) = {'UNKNOWN'};
+        % pageData
+        queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalCode = cellstr(string(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalCode)); % format all PostalCodes as strings 
+        queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.StateAbbr(cellfun(@all, cellfun(@ismissing, queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.StateAbbr, 'UniformOutput', false))) = {'NULL'}; % replace all missing entries of StateAbbr with NULL
+        queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data = addvars(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data, cell(height(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data), 1), 'Before', 'PostalCode', 'NewVariableNames', 'PostalStateCode');
+        queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalStateCode(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.CountryCode ~= 0) = {'International'}; % records where country is not USA = 'International'
+        queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalStateCode((queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.CountryCode == 0) & matches(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.StateAbbr, officialTerritoryList)) = {'USA_Territory'}; % records where country is USA AND state is on officialTerritoryList = 'USA_Territory'
+        queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalStateCode((queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.CountryCode == 0) & matches(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.StateAbbr, officialStateList)) = queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.StateAbbr((queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.CountryCode == 0) & matches(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.StateAbbr, officialStateList)); % records where country is USA AND state is on officialStateList = whatever the state is for that record
+        queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalStateCode(cellfun(@isempty, queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalStateCode) & matches(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalCode, digitsPattern(5))) = replace(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalCode(cellfun(@isempty, queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalStateCode) & matches(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalCode, digitsPattern(5))), zipRawTable.DELIVERYZIPCODE, zipRawTable.PHYSICALSTATE); % of the remaining unassigned records, if PostalCode is 5 digits, lookup state using post office zip data 
+        queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalStateCode(cellfun(@isempty, queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalStateCode) & matches(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalCode, digitsPattern(5) + '-' + digitsPattern(4))) = replace(extractBefore(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalCode(cellfun(@isempty, queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalStateCode) & matches(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalCode, digitsPattern(5) + '-' + digitsPattern(4))), '-'), zipRawTable.DELIVERYZIPCODE, zipRawTable.PHYSICALSTATE); % of the remaining unassigned records, if PostalCode is '#####-####', lookup state using post office zip data 
+        queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalStateCode(cellfun(@isempty, queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalStateCode) & ~matches(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.StateAbbr, {char(0), 'NULL'})) = {'International'}; % remaining unassigned records with text in StateAbbr that isn't blank or NULL = 'International'
+        queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalStateCode(cellfun(@isempty, queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalStateCode)) = {'UNKNOWN'}; % all remaining unassigned records are given the status of unknown
+        queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalStateCode(~matches(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalStateCode, [officialStateList; {'UNKNOWN'; 'USA_Territory'; 'International'}])) = {'UNKNOWN'};
+
+        fprintf('Replaced postal codes with state abbreviations = %.3g sec\n', toc);
+
+        % - Arrange data into format for PowerBI -
+        % load Project Survey Group Naming Key data to group surveys (e.g., "Dup##"
+        % for Dupuytrens should belong to the "Long" group)
+        try
+            warning off
+            groupKeyTable.(string(currentDiagnosisCode)) = readtable('Project Survey Group Naming Key.xlsx', 'Sheet',string(currentDiagnosisCode));
+            warning on
+        catch ME
+            if strcmp(ME.identifier, 'MATLAB:spreadsheet:book:openSheetName')
+                error('Couldn''t find a sheet in "%s\\Project Survey Group Naming Key.xlsx" named "%s". Please add said sheet to said workbook.', string(pwd), string(currentDiagnosisCode));
+            else
+                rethrow(ME);
+            end
+        end
+        % replace any spaces in SurveyGroup with underscores
+        groupKeyTable.(string(currentDiagnosisCode)).SurveyGroup = replace(groupKeyTable.(string(currentDiagnosisCode)).SurveyGroup, ' ', '_');
+        
+        % total surveys sent for each survey
+        surveysSentGroupCounts = groupcounts(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data, 'DatabasePrefix');
+        %%
+        for variationType = variationTypeList
+            switch string(variationType)
+                case 'Standard'
+                    % initialize outputDataCell. Columns: DatabasePrefix, DiagnosisCode, SurveyGroupName, 
+                    % PhaseStatus, PageName, [tableTypeList], TotalSurveys
+                    [uniqueDatabasePrefixes, uniqueDatabasePrefixRows] = unique(queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix);
+                    outputDataCell.(string(currentDiagnosisCode)).(string(variationType)) = cell(sum(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DiagnosisCode, string(currentDiagnosisCode))) + length(uniqueDatabasePrefixes) + 1, 6 + length(tableTypeList));
+                    % column headers
+                    outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:) = [{'DatabasePrefix','DiagnosisCode', 'SurveyGroupName', 'PhaseStatus', 'PageName'}, tableTypeList, {'TotalSurveys'}];
+                    % database prefix
+                    outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2:end, 1) = [queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix; uniqueDatabasePrefixes]; % database prefix
+                    % diagnosis code
+                    outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2:end, 2) = repmat({string(currentDiagnosisCode)}, height(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))) - 1, 1); % diagnosis code
+                    % survey group name
+                    for surveyGroupNum = 1:height(groupKeyTable.(string(currentDiagnosisCode)))
+                        outputDataCell.(string(currentDiagnosisCode)).(string(variationType))([false; cellfun(@any, regexp([queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix; uniqueDatabasePrefixes], groupKeyTable.(string(currentDiagnosisCode)).DatabasePrefixToken(surveyGroupNum)))], 3) = groupKeyTable.(string(currentDiagnosisCode)).SurveyGroup(surveyGroupNum); % survey group name
+                    end
+                    % if a survey wasn't assigned to a group, throw an error notifying the user that they need a group to account for that survey
+                    if any(~cellfun(@ischar, outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:,3))) % if a survey wasn't assigned to a group, throw an error notifying the user that they need a group to account for that survey
+                        error('No group was assigned to the following survey(s): %s. Please assign a group in "%s" sheet of "%s\\Project Survey Group Naming Key.xlsx".', string(join(uniqueDatabasePrefixes(~cellfun(@ischar, outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(sum(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DiagnosisCode, string(currentDiagnosisCode))) + 2 : end, 3)))', ', ')), string(currentDiagnosisCode), string(pwd))
+                    end
+                    % phase status
+                    outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2:end, 4) = [queryList.projectDatabaseInfo.(string(currentProject)).data.PhaseStatus; queryList.projectDatabaseInfo.(string(currentProject)).data.PhaseStatus(uniqueDatabasePrefixRows)]; % phase status
+                    % page name
+                    outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2:end, 5) = [queryList.projectDatabaseInfo.(string(currentProject)).data.PageHeader; repmat({'Surveys Sent'}, length(uniqueDatabasePrefixes), 1)]; % page name
+                    % bulk of data
+                    for pageNum = 1:max(queryList.projectDatabaseInfo.(string(currentProject)).data.PageNumber)
+                        databasePrefixForPage{pageNum} = queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix(contains(queryList.projectDatabaseInfo.(string(currentProject)).data.PageHeader, sprintf('[%d]', pageNum)));
+                        pageGroupCounts{pageNum} = groupcounts(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data, {'DatabasePrefix', sprintf('pg%02d_SurveyStatus', pageNum)});
+                        for databasePrefix = databasePrefixForPage{pageNum}'
+                            for tableType = tableTypeList
+                                if contains(tableType, 'Completed')
+                                    validStatusCodes = table2array(queryList.projectDatabaseInfo.(string(currentProject)).data(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix, databasePrefix) & contains(queryList.projectDatabaseInfo.(string(currentProject)).data.PageHeader, sprintf('[%d]', pageNum)), matches(queryList.projectDatabaseInfo.(string(currentProject)).data.Properties.VariableNames, tableTypeListStatuses.Completed)));
+                                    outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:,1), databasePrefix) & contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:,5), sprintf('[%d]', pageNum)), contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:), 'Completed')) = {sum(pageGroupCounts{pageNum}.GroupCount(matches(pageGroupCounts{pageNum}.DatabasePrefix, databasePrefix) & any(pageGroupCounts{pageNum}.(sprintf('pg%02d_SurveyStatus', pageNum)) == validStatusCodes, 2), :))};
+                                elseif contains(tableType, 'Started')
+                                    validStatusCodes = table2array(queryList.projectDatabaseInfo.(string(currentProject)).data(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix, databasePrefix) & contains(queryList.projectDatabaseInfo.(string(currentProject)).data.PageHeader, sprintf('[%d]', pageNum)), matches(queryList.projectDatabaseInfo.(string(currentProject)).data.Properties.VariableNames, tableTypeListStatuses.Started)));
+                                    outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:,1), databasePrefix) & contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:,5), sprintf('[%d]', pageNum)), contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:), 'Started')) = {sum(pageGroupCounts{pageNum}.GroupCount(matches(pageGroupCounts{pageNum}.DatabasePrefix, databasePrefix) & any(pageGroupCounts{pageNum}.(sprintf('pg%02d_SurveyStatus', pageNum)) == validStatusCodes, 2), :))};
+                                elseif contains(tableType, 'Unfinished')
+                                    validStatusCodes = table2array(queryList.projectDatabaseInfo.(string(currentProject)).data(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix, databasePrefix) & contains(queryList.projectDatabaseInfo.(string(currentProject)).data.PageHeader, sprintf('[%d]', pageNum)), matches(queryList.projectDatabaseInfo.(string(currentProject)).data.Properties.VariableNames, tableTypeListStatuses.Unfinished)));
+                                    outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:,1), databasePrefix) & contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:,5), sprintf('[%d]', pageNum)), contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:), 'Unfinished')) = {sum(pageGroupCounts{pageNum}.GroupCount(matches(pageGroupCounts{pageNum}.DatabasePrefix, databasePrefix) & any(pageGroupCounts{pageNum}.(sprintf('pg%02d_SurveyStatus', pageNum)) == validStatusCodes, 2), :))};
+                                end
+                            end
+                        end
+                    end
+                    % total surveys sent
+                    for databasePrefixNum = 1:length(uniqueDatabasePrefixes)
+                        totalSurveysSent = sum(matches(queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data.DatabasePrefix, uniqueDatabasePrefixes(databasePrefixNum)));
+                        outputDataCell.(string(currentDiagnosisCode)).(string(variationType))([false; matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2 : sum(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DiagnosisCode, string(currentDiagnosisCode))) + 1,1), uniqueDatabasePrefixes(databasePrefixNum)); false(length(uniqueDatabasePrefixes), 1)], contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:), 'percent' + wildcardPattern + 'Started')) = num2cell(cell2mat(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))([false; matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2 : sum(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DiagnosisCode, string(currentDiagnosisCode))) + 1,1), uniqueDatabasePrefixes(databasePrefixNum)); false(length(uniqueDatabasePrefixes), 1)], contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:), 'percent' + wildcardPattern + 'Started'))) / totalSurveysSent); % normalize started percentage column
+                        outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(sum(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DiagnosisCode, string(currentDiagnosisCode))) + 1 + databasePrefixNum, end) = {sprintf('(n=%d)', totalSurveysSent)}; % populate rows specifically for num surveys sent
+                    end
+                    % normalize percent completed and percent unfinished to
+                    % the number of surveys started
+                    outputDataCell.(string(currentDiagnosisCode)).(string(variationType))([false; true(sum(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DiagnosisCode, string(currentDiagnosisCode))), 1); false(length(uniqueDatabasePrefixes), 1)], contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:), 'percent') & ~contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:), 'Started')) = num2cell(cell2mat(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))([false; true(sum(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DiagnosisCode, string(currentDiagnosisCode))), 1); false(length(uniqueDatabasePrefixes), 1)], contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:), 'percent') & ~contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:), 'Started'))) ./ cell2mat(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))([false; true(sum(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DiagnosisCode, string(currentDiagnosisCode))), 1); false(length(uniqueDatabasePrefixes), 1)], ~contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:), 'percent') & contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:), 'Started'))));
+                case 'Weekday'
+                    % initialize outputDataCell. Columns: DatabasePrefix, DiagnosisCode, SurveyGroupName, 
+                    % PhaseStatus, PageName, Weekday, [tableTypeList],
+                    % TotalSurveys, WeekdayIndex
+                    [uniqueDatabasePrefixes, uniqueDatabasePrefixRows] = unique(queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix);
+                    outputDataCell.(string(currentDiagnosisCode)).(string(variationType)) = cell(7*(sum(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DiagnosisCode, string(currentDiagnosisCode))) + length(uniqueDatabasePrefixes)) + 1, 8 + length(tableTypeList));
+                    
+                    % column headers
+                    outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:) = [{'DatabasePrefix','DiagnosisCode', 'SurveyGroupName', 'PhaseStatus', 'PageName','Weekday'}, tableTypeList, {'TotalSurveys','WeekdayIndex'}];
+                    
+                    % duplicate current database prefix however many times
+                    % needed (e.g., times 2 if the databasePrefix has 2 
+                    % pages then times 7 for each day of the week) 
+                    rowTracker = 2;
+                    for databasePrefixNum = 1:length(uniqueDatabasePrefixes)
+                        % non-num surveys sent rows
+                        numRows = sum(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix, uniqueDatabasePrefixes(databasePrefixNum))) * 7;
+                        outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(rowTracker : rowTracker + numRows - 1, 1) = uniqueDatabasePrefixes(databasePrefixNum);
+                        rowTracker = rowTracker + numRows;
+                    end
+                    for databasePrefixNum = 1:length(uniqueDatabasePrefixes)
+                        % num surveys sent rows
+                        numRows = 7;
+                        outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(rowTracker : rowTracker + numRows - 1, 1) = uniqueDatabasePrefixes(databasePrefixNum);
+                        rowTracker = rowTracker + numRows;
+                    end
+
+                    % diagnosis code
+                    outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2:end, 2) = repmat({string(currentDiagnosisCode)}, height(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))) - 1, 1); % diagnosis code
+                    
+                    % survey group name
+                    for surveyGroupNum = 1:height(groupKeyTable.(string(currentDiagnosisCode)))
+                        outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(cellfun(@any, regexp(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:, 1), groupKeyTable.(string(currentDiagnosisCode)).DatabasePrefixToken(surveyGroupNum))), 3) = groupKeyTable.(string(currentDiagnosisCode)).SurveyGroup(surveyGroupNum); % survey group name
+                    end
+                    if any(~cellfun(@ischar, outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:,3))) % if a survey wasn't assigned to a group, throw an error notifying the user that they need a group to account for that survey
+                        error('No group was assigned to the following survey(s): %s. Please assign a group in "%s" sheet of "%s\\Project Survey Group Naming Key.xlsx".', string(join(uniqueDatabasePrefixes(~cellfun(@ischar, outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(sum(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DiagnosisCode, string(currentDiagnosisCode))) + 2 : end, 3)))', ', ')), string(currentDiagnosisCode), string(pwd))
+                    end
+
+                    % phase status
+                    rowTracker = 2;
+                    for databasePrefixNum = 1:length(uniqueDatabasePrefixes)
+                        % non-num surveys sent rows
+                        numRows = sum(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix, uniqueDatabasePrefixes(databasePrefixNum))) * 7;
+                        outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(rowTracker : rowTracker + numRows - 1, 4) = queryList.projectDatabaseInfo.(string(currentProject)).data.PhaseStatus(uniqueDatabasePrefixRows(databasePrefixNum)); % phase status
+                        rowTracker = rowTracker + numRows;
+                    end
+                    for databasePrefixNum = 1:length(uniqueDatabasePrefixes)
+                        % num surveys sent rows
+                        numRows = 7;
+                        outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(rowTracker : rowTracker + numRows - 1, 4) = queryList.projectDatabaseInfo.(string(currentProject)).data.PhaseStatus(uniqueDatabasePrefixRows(databasePrefixNum));
+                        rowTracker = rowTracker + numRows;
+                    end
+
+                    % page name
+                    rowTracker = 2;
+                    for databasePrefixNum = 1:length(uniqueDatabasePrefixes)
+                        % non-num surveys sent rows
+                        numRows = sum(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix, uniqueDatabasePrefixes(databasePrefixNum))) * 7;
+                        outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(rowTracker : rowTracker + numRows - 1, 5) = repmat(queryList.projectDatabaseInfo.(string(currentProject)).data.PageHeader(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix, uniqueDatabasePrefixes(databasePrefixNum))), 7, 1); % page name
+                        rowTracker = rowTracker + numRows;
+                    end
+                    for databasePrefixNum = 1:length(uniqueDatabasePrefixes)
+                        % num surveys sent rows
+                        numRows = 7;
+                        outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(rowTracker : rowTracker + numRows - 1, 5) = {'Surveys Sent'};
+                        rowTracker = rowTracker + numRows;
+                    end
+
+                    % weekday
+                    rowTracker = 2;
+                    for databasePrefixNum = 1:length(uniqueDatabasePrefixes)
+                        % non-num surveys sent rows
+                        numRows = sum(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix, uniqueDatabasePrefixes(databasePrefixNum))) * 7;
+                        outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(rowTracker : rowTracker + numRows - 1, 6) = reshape(repmat(weekdayList, sum(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix, uniqueDatabasePrefixes(databasePrefixNum))), 1), [], 1); % weekday
+                        rowTracker = rowTracker + numRows;
+                    end
+                    for databasePrefixNum = 1:length(uniqueDatabasePrefixes)
+                        % num surveys sent rows
+                        numRows = 7;
+                        outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(rowTracker : rowTracker + numRows - 1, 6) = weekdayList;
+                        rowTracker = rowTracker + numRows;
+                    end
+                    
+                    % WeekdayIndex
+                    for weekdayNum = 1:length(weekdayList)
+                        outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:, 6), weekdayList(weekdayNum)), end) = {weekdayNum};
+                    end
+                    
+                    % bulk of data
+                    for pageNum = 1:max(queryList.projectDatabaseInfo.(string(currentProject)).data.PageNumber)
+                        databasePrefixForPage{pageNum} = queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix(contains(queryList.projectDatabaseInfo.(string(currentProject)).data.PageHeader, sprintf('[%d]', pageNum)));
+                        pageGroupCounts{pageNum} = groupcounts(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data, {'DatabasePrefix', sprintf('pg%02d_SurveyStatus', pageNum), sprintf('pg%02d_LastActivityDate', pageNum)}, {'none', 'none', 'dayofweek'}); % GROUPCOUNTS BY survey status and WEEKDAY OF ACTIVITYDATE
+                        for databasePrefix = databasePrefixForPage{pageNum}'
+                            for tableType = tableTypeList
+                                if contains(tableType, 'Completed')
+                                    validStatusCodes = table2array(queryList.projectDatabaseInfo.(string(currentProject)).data(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix, databasePrefix) & contains(queryList.projectDatabaseInfo.(string(currentProject)).data.PageHeader, sprintf('[%d]', pageNum)), matches(queryList.projectDatabaseInfo.(string(currentProject)).data.Properties.VariableNames, tableTypeListStatuses.Completed)));
+                                    for weekdayNum = 1:7
+                                        if any(matches(pageGroupCounts{pageNum}.DatabasePrefix, databasePrefix) & (int8(pageGroupCounts{pageNum}.(sprintf('dayofweek_pg%02d_LastActivityDate', pageNum))) == weekdayNum) & any(pageGroupCounts{pageNum}.(sprintf('pg%02d_SurveyStatus', pageNum)) == validStatusCodes, 2))
+                                            outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:,1), databasePrefix) & contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:,5), sprintf('[%d]', pageNum)) & [false; ismember(cell2mat(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2:end, end)), weekdayNum)], contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:), 'Completed')) = {sum(pageGroupCounts{pageNum}.GroupCount(matches(pageGroupCounts{pageNum}.DatabasePrefix, databasePrefix) & (int8(pageGroupCounts{pageNum}.(sprintf('dayofweek_pg%02d_LastActivityDate', pageNum))) == weekdayNum) & any(pageGroupCounts{pageNum}.(sprintf('pg%02d_SurveyStatus', pageNum)) == validStatusCodes, 2), :))};
+                                        else
+                                            outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:,1), databasePrefix) & contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:,5), sprintf('[%d]', pageNum)) & [false; ismember(cell2mat(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2:end, end)), weekdayNum)], contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:), 'Completed')) = {0};
+                                        end
+                                    end
+                                elseif contains(tableType, 'Started')
+                                    validStatusCodes = table2array(queryList.projectDatabaseInfo.(string(currentProject)).data(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix, databasePrefix) & contains(queryList.projectDatabaseInfo.(string(currentProject)).data.PageHeader, sprintf('[%d]', pageNum)), matches(queryList.projectDatabaseInfo.(string(currentProject)).data.Properties.VariableNames, tableTypeListStatuses.Started)));
+                                    for weekdayNum = 1:7
+                                        if any(matches(pageGroupCounts{pageNum}.DatabasePrefix, databasePrefix) & (int8(pageGroupCounts{pageNum}.(sprintf('dayofweek_pg%02d_LastActivityDate', pageNum))) == weekdayNum) & any(pageGroupCounts{pageNum}.(sprintf('pg%02d_SurveyStatus', pageNum)) == validStatusCodes, 2))
+                                            outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:,1), databasePrefix) & contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:,5), sprintf('[%d]', pageNum)) & [false; ismember(cell2mat(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2:end, end)), weekdayNum)], contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:), 'Started')) = {sum(pageGroupCounts{pageNum}.GroupCount(matches(pageGroupCounts{pageNum}.DatabasePrefix, databasePrefix) & (int8(pageGroupCounts{pageNum}.(sprintf('dayofweek_pg%02d_LastActivityDate', pageNum))) == weekdayNum) & any(pageGroupCounts{pageNum}.(sprintf('pg%02d_SurveyStatus', pageNum)) == validStatusCodes, 2), :))};
+                                        else
+                                            outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:,1), databasePrefix) & contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:,5), sprintf('[%d]', pageNum)) & [false; ismember(cell2mat(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2:end, end)), weekdayNum)], contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:), 'Started')) = {0};
+                                        end
+                                    end
+                                elseif contains(tableType, 'Unfinished')
+                                    validStatusCodes = table2array(queryList.projectDatabaseInfo.(string(currentProject)).data(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix, databasePrefix) & contains(queryList.projectDatabaseInfo.(string(currentProject)).data.PageHeader, sprintf('[%d]', pageNum)), matches(queryList.projectDatabaseInfo.(string(currentProject)).data.Properties.VariableNames, tableTypeListStatuses.Unfinished)));
+                                    for weekdayNum = 1:7
+                                        if any(matches(pageGroupCounts{pageNum}.DatabasePrefix, databasePrefix) & (int8(pageGroupCounts{pageNum}.(sprintf('dayofweek_pg%02d_LastActivityDate', pageNum))) == weekdayNum) & any(pageGroupCounts{pageNum}.(sprintf('pg%02d_SurveyStatus', pageNum)) == validStatusCodes, 2))
+                                            outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:,1), databasePrefix) & contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:,5), sprintf('[%d]', pageNum)) & [false; ismember(cell2mat(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2:end, end)), weekdayNum)], contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:), 'Unfinished')) = {sum(pageGroupCounts{pageNum}.GroupCount(matches(pageGroupCounts{pageNum}.DatabasePrefix, databasePrefix) & (int8(pageGroupCounts{pageNum}.(sprintf('dayofweek_pg%02d_LastActivityDate', pageNum))) == weekdayNum) & any(pageGroupCounts{pageNum}.(sprintf('pg%02d_SurveyStatus', pageNum)) == validStatusCodes, 2), :))};
+                                        else
+                                            outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:,1), databasePrefix) & contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:,5), sprintf('[%d]', pageNum)) & [false; ismember(cell2mat(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2:end, end)), weekdayNum)], contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:), 'Unfinished')) = {0};
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+
+                    % surveys sent
+                    for databasePrefixNum = 1:length(uniqueDatabasePrefixes)
+                        totalSurveysSent = sum(matches(queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data.DatabasePrefix, uniqueDatabasePrefixes(databasePrefixNum)));
+                        outputDataCell.(string(currentDiagnosisCode)).(string(variationType))([false; matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2 : sum(~matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2:end, 5), 'Surveys Sent')) + 1, 1), uniqueDatabasePrefixes(databasePrefixNum)); false(sum(matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2:end, 5), 'Surveys Sent')), 1)], contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:), 'percent' + wildcardPattern + 'Started')) = num2cell(cell2mat(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))([false; matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2 : sum(~matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2:end, 5), 'Surveys Sent')) + 1, 1), uniqueDatabasePrefixes(databasePrefixNum)); false(sum(matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2:end, 5), 'Surveys Sent')), 1)], contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:), 'percent' + wildcardPattern + 'Started'))) / totalSurveysSent); % normalize started percentage column
+                        outputDataCell.(string(currentDiagnosisCode)).(string(variationType))([false; matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2:end, 1), uniqueDatabasePrefixes(databasePrefixNum)) & matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2:end, 5), 'Surveys Sent')], end - 1) = {sprintf('(n=%d)', totalSurveysSent)}; % populate rows specifically for num surveys sent
+                    end
+
+                    % normalize percent completed and percent unfinished to
+                    % the number of surveys started
+                    outputDataCell.(string(currentDiagnosisCode)).(string(variationType))([false; true(height(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))) - sum(matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2:end, 5), 'Surveys Sent')) - 1, 1); false(sum(matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2:end, 5), 'Surveys Sent')), 1)], contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:), 'percent') & ~contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:), 'Started')) = num2cell(cell2mat(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))([false; true(height(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))) - sum(matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2:end, 5), 'Surveys Sent')) - 1, 1); false(sum(matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2:end, 5), 'Surveys Sent')), 1)], contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:), 'percent') & ~contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:), 'Started'))) ./ cell2mat(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))([false; true(height(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))) - sum(matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2:end, 5), 'Surveys Sent')) - 1, 1); false(sum(matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2:end, 5), 'Surveys Sent')), 1)], ~contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:), 'percent') & contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:), 'Started'))));
+                case 'PostalState'
+                    % initialize outputDataCell. Columns: DatabasePrefix, DiagnosisCode, SurveyGroupName, 
+                    % PhaseStatus, PageName, PostalState, [tableTypeList], TotalSurveys
+                    % NOTE: For PageName column, only include "Surveys
+                    % Sent" and the last page of the survey
+                    [uniqueDatabasePrefixes, uniqueDatabasePrefixRows] = unique(queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix);
+                    uniquePostalStates = unique(queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalStateCode);
+                    outputDataCell.(string(currentDiagnosisCode)).(string(variationType)) = cell(2 * length(uniqueDatabasePrefixes) * length(uniquePostalStates) + 1, 7 + length(tableTypeList));
+
+                    
+                    % column headers
+                    outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:) = [{'DatabasePrefix','DiagnosisCode', 'SurveyGroupName', 'PhaseStatus', 'PageName','PostalState'}, tableTypeList, {'TotalSurveys'}];
+                    
+                    % duplicate current database prefix however many times
+                    % needed 
+                    rowTracker = 2;
+                    for databasePrefixNum = 1:length(uniqueDatabasePrefixes)
+                        % non-num surveys sent rows
+                        % numRows = sum(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix, uniqueDatabasePrefixes(databasePrefixNum))) * 7;
+                        numRows = length(uniquePostalStates);
+                        outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(rowTracker : rowTracker + numRows - 1, 1) = uniqueDatabasePrefixes(databasePrefixNum);
+                        rowTracker = rowTracker + numRows;
+                    end
+                    for databasePrefixNum = 1:length(uniqueDatabasePrefixes)
+                        % num surveys sent rows
+                        % numRows = 7;
+                        numRows = length(uniquePostalStates);
+                        outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(rowTracker : rowTracker + numRows - 1, 1) = uniqueDatabasePrefixes(databasePrefixNum);
+                        rowTracker = rowTracker + numRows;
+                    end
+
+                    % diagnosis code
+                    outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2:end, 2) = repmat({string(currentDiagnosisCode)}, height(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))) - 1, 1); % diagnosis code
+                    
+                    % survey group name
+                    for surveyGroupNum = 1:height(groupKeyTable.(string(currentDiagnosisCode)))
+                        outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(cellfun(@any, regexp(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:, 1), groupKeyTable.(string(currentDiagnosisCode)).DatabasePrefixToken(surveyGroupNum))), 3) = groupKeyTable.(string(currentDiagnosisCode)).SurveyGroup(surveyGroupNum); % survey group name
+                    end
+                    if any(~cellfun(@ischar, outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:,3))) % if a survey wasn't assigned to a group, throw an error notifying the user that they need a group to account for that survey
+                        error('No group was assigned to the following survey(s): %s. Please assign a group in "%s" sheet of "%s\\Project Survey Group Naming Key.xlsx".', string(join(uniqueDatabasePrefixes(~cellfun(@ischar, outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(sum(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DiagnosisCode, string(currentDiagnosisCode))) + 2 : end, 3)))', ', ')), string(currentDiagnosisCode), string(pwd))
+                    end
+
+                    % phase status
+                    rowTracker = 2;
+                    for databasePrefixNum = 1:length(uniqueDatabasePrefixes)
+                        % non-num surveys sent rows
+                        numRows = length(uniquePostalStates);
+                        outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(rowTracker : rowTracker + numRows - 1, 4) = queryList.projectDatabaseInfo.(string(currentProject)).data.PhaseStatus(uniqueDatabasePrefixRows(databasePrefixNum)); % phase status
+                        rowTracker = rowTracker + numRows;
+                    end
+                    for databasePrefixNum = 1:length(uniqueDatabasePrefixes)
+                        % num surveys sent rows
+                        numRows = length(uniquePostalStates);
+                        outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(rowTracker : rowTracker + numRows - 1, 4) = queryList.projectDatabaseInfo.(string(currentProject)).data.PhaseStatus(uniqueDatabasePrefixRows(databasePrefixNum));
+                        rowTracker = rowTracker + numRows;
+                    end
+
+                    % page name
+                    rowTracker = 2;
+                    for databasePrefixNum = 1:length(uniqueDatabasePrefixes)
+                        % non-num surveys sent rows
+                        numRows = length(uniquePostalStates);
+                        outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(rowTracker : rowTracker + numRows - 1, 5) = repmat(queryList.projectDatabaseInfo.(string(currentProject)).data.PageHeader(max(find(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix, uniqueDatabasePrefixes(databasePrefixNum))))), length(uniquePostalStates), 1); % last page name for the current survey
+                        rowTracker = rowTracker + numRows;
+                    end
+                    for databasePrefixNum = 1:length(uniqueDatabasePrefixes)
+                        % num surveys sent rows
+                        numRows = length(uniquePostalStates);
+                        outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(rowTracker : rowTracker + numRows - 1, 5) = {'Surveys Sent'};
+                        rowTracker = rowTracker + numRows;
+                    end
+
+                    % postal state
+                    rowTracker = 2;
+                    for databasePrefixNum = 1:length(uniqueDatabasePrefixes)
+                        % non-num surveys sent rows
+                        numRows = length(uniquePostalStates);
+                        outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(rowTracker : rowTracker + numRows - 1, 6) = uniquePostalStates; % Postal State
+                        rowTracker = rowTracker + numRows;
+                    end
+                    for databasePrefixNum = 1:length(uniqueDatabasePrefixes)
+                        % num surveys sent rows
+                        numRows = length(uniquePostalStates);
+                        outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(rowTracker : rowTracker + numRows - 1, 6) = uniquePostalStates;
+                        rowTracker = rowTracker + numRows;
+                    end
+                    
+                    % bulk of data
+                    for pageNum = 1:max(queryList.projectDatabaseInfo.(string(currentProject)).data.PageNumber)
+                        if any(cellfun(@str2double, extractBetween(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(startsWith(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:,5), '[' + digitsPattern + ']'), 5), '[', ']')) == pageNum)
+                            databasePrefixForPage{pageNum} = unique(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))([false; cellfun(@str2double, extractBetween(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(startsWith(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:,5), '[' + digitsPattern + ']'), 5), '[', ']')) == pageNum; false(length(uniqueDatabasePrefixes) * length(uniquePostalStates), 1)], 1)); % surveys whose last page is pageNum
+                            pageGroupCounts{pageNum} = groupcounts(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data, {'DatabasePrefix', sprintf('pg%02d_SurveyStatus', pageNum), 'PostalStateCode'}); % GROUPCOUNTS BY survey status and PostalState
+                            for databasePrefix = databasePrefixForPage{pageNum}'
+                                for tableType = tableTypeList
+                                    if contains(tableType, 'Completed')
+                                        validStatusCodes = table2array(queryList.projectDatabaseInfo.(string(currentProject)).data(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix, databasePrefix) & contains(queryList.projectDatabaseInfo.(string(currentProject)).data.PageHeader, sprintf('[%d]', pageNum)), matches(queryList.projectDatabaseInfo.(string(currentProject)).data.Properties.VariableNames, tableTypeListStatuses.Completed)));
+                                        for postalState = uniquePostalStates'
+                                            if any(matches(pageGroupCounts{pageNum}.DatabasePrefix, databasePrefix) & matches(pageGroupCounts{pageNum}.PostalStateCode, postalState) & any(pageGroupCounts{pageNum}.(sprintf('pg%02d_SurveyStatus', pageNum)) == validStatusCodes, 2))
+                                                outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:,1), databasePrefix) & contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:,5), sprintf('[%d]', pageNum)) & matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:,6), postalState), contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:), 'Completed')) = {sum(pageGroupCounts{pageNum}.GroupCount(matches(pageGroupCounts{pageNum}.DatabasePrefix, databasePrefix) & matches(pageGroupCounts{pageNum}.PostalStateCode, postalState) & any(pageGroupCounts{pageNum}.(sprintf('pg%02d_SurveyStatus', pageNum)) == validStatusCodes, 2), :))};
+                                            else
+                                                outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:,1), databasePrefix) & contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:,5), sprintf('[%d]', pageNum)) & matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:,6), postalState), contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:), 'Completed')) = {0};
+                                            end
+                                        end
+                                    elseif contains(tableType, 'Started')
+                                        validStatusCodes = table2array(queryList.projectDatabaseInfo.(string(currentProject)).data(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix, databasePrefix) & contains(queryList.projectDatabaseInfo.(string(currentProject)).data.PageHeader, sprintf('[%d]', pageNum)), matches(queryList.projectDatabaseInfo.(string(currentProject)).data.Properties.VariableNames, tableTypeListStatuses.Started)));
+                                        for postalState = uniquePostalStates'
+                                            if any(matches(pageGroupCounts{pageNum}.DatabasePrefix, databasePrefix) & matches(pageGroupCounts{pageNum}.PostalStateCode, postalState) & any(pageGroupCounts{pageNum}.(sprintf('pg%02d_SurveyStatus', pageNum)) == validStatusCodes, 2))
+                                                outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:,1), databasePrefix) & contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:,5), sprintf('[%d]', pageNum)) & matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:,6), postalState), contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:), 'Started')) = {sum(pageGroupCounts{pageNum}.GroupCount(matches(pageGroupCounts{pageNum}.DatabasePrefix, databasePrefix) & matches(pageGroupCounts{pageNum}.PostalStateCode, postalState) & any(pageGroupCounts{pageNum}.(sprintf('pg%02d_SurveyStatus', pageNum)) == validStatusCodes, 2), :))};
+                                            else
+                                                outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:,1), databasePrefix) & contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:,5), sprintf('[%d]', pageNum)) & matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:,6), postalState), contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:), 'Started')) = {0};
+                                            end
+                                        end
+                                    elseif contains(tableType, 'Unfinished')
+                                        validStatusCodes = table2array(queryList.projectDatabaseInfo.(string(currentProject)).data(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix, databasePrefix) & contains(queryList.projectDatabaseInfo.(string(currentProject)).data.PageHeader, sprintf('[%d]', pageNum)), matches(queryList.projectDatabaseInfo.(string(currentProject)).data.Properties.VariableNames, tableTypeListStatuses.Unfinished)));
+                                        for postalState = uniquePostalStates'
+                                            if any(matches(pageGroupCounts{pageNum}.DatabasePrefix, databasePrefix) & matches(pageGroupCounts{pageNum}.PostalStateCode, postalState) & any(pageGroupCounts{pageNum}.(sprintf('pg%02d_SurveyStatus', pageNum)) == validStatusCodes, 2))
+                                                outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:,1), databasePrefix) & contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:,5), sprintf('[%d]', pageNum)) & matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:,6), postalState), contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:), 'Unfinished')) = {sum(pageGroupCounts{pageNum}.GroupCount(matches(pageGroupCounts{pageNum}.DatabasePrefix, databasePrefix) & matches(pageGroupCounts{pageNum}.PostalStateCode, postalState) & any(pageGroupCounts{pageNum}.(sprintf('pg%02d_SurveyStatus', pageNum)) == validStatusCodes, 2), :))};
+                                            else
+                                                outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:,1), databasePrefix) & contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:,5), sprintf('[%d]', pageNum)) & matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(:,6), postalState), contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:), 'Unfinished')) = {0};
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                    
+                    % surveys sent to each state
+                    for databasePrefixNum = 1:length(uniqueDatabasePrefixes)
+                        for postalState = uniquePostalStates'
+                            totalSurveysSent = sum(matches(queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data.DatabasePrefix, uniqueDatabasePrefixes(databasePrefixNum)) & matches(queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data.PostalStateCode, postalState));
+                            outputDataCell.(string(currentDiagnosisCode)).(string(variationType))([false; matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2 : sum(~matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2:end, 5), 'Surveys Sent')) + 1, 1), uniqueDatabasePrefixes(databasePrefixNum)) & matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2 : sum(~matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2:end, 5), 'Surveys Sent')) + 1, 6), postalState); false(sum(matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2:end, 5), 'Surveys Sent')), 1)], contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:), 'percent' + wildcardPattern + 'Started')) = num2cell(cell2mat(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))([false; matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2 : sum(~matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2:end, 5), 'Surveys Sent')) + 1, 1), uniqueDatabasePrefixes(databasePrefixNum)) & matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2 : sum(~matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2:end, 5), 'Surveys Sent')) + 1, 6), postalState); false(sum(matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2:end, 5), 'Surveys Sent')), 1)], contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:), 'percent' + wildcardPattern + 'Started'))) / totalSurveysSent); % normalize started percentage column
+                            outputDataCell.(string(currentDiagnosisCode)).(string(variationType))([false; matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2:end, 1), uniqueDatabasePrefixes(databasePrefixNum)) & matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2:end, 6), postalState) & matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2:end, 5), 'Surveys Sent')], end) = {sprintf('(n=%d)', totalSurveysSent)}; % populate rows specifically for num surveys sent
+                        end
+                    end
+                    
+                    % normalize percent completed and percent unfinished to
+                    % the number of surveys started
+                    outputDataCell.(string(currentDiagnosisCode)).(string(variationType))([false; true(height(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))) - sum(matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2:end, 5), 'Surveys Sent')) - 1, 1); false(sum(matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2:end, 5), 'Surveys Sent')), 1)], contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:), 'percent') & ~contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:), 'Started')) = num2cell(cell2mat(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))([false; true(height(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))) - sum(matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2:end, 5), 'Surveys Sent')) - 1, 1); false(sum(matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2:end, 5), 'Surveys Sent')), 1)], contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:), 'percent') & ~contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:), 'Started'))) ./ cell2mat(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))([false; true(height(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))) - sum(matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2:end, 5), 'Surveys Sent')) - 1, 1); false(sum(matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(2:end, 5), 'Surveys Sent')), 1)], ~contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:), 'percent') & contains(outputDataCell.(string(currentDiagnosisCode)).(string(variationType))(1,:), 'Started'))));
+            end
+        end
+        %%
+        % --- Calculate aggregate KPIs ---
+        % calculate the number of participants who completed surveys, by
+        % survey group and by phase (or maybe months instead???)
+        % *include number of total surveys ever completed for the current 
+        % survey group
+        kpis.surveyCompletion.(string(currentProject)).(string(currentDiagnosisCode)) = table('Size',[0,8], 'VariableTypes', {'cell','cell','cell','cell','cell','cell','cell','double'}, 'VariableNames', {'ProjectName','DiagnosisCode','DatabasePrefix','SurveyGroupName','PhaseStatus','LastPageName','MonthYear','NumSurveysCompleted'});
+        % figure out how many rows need to be created. For each
+        % survey/phase, there should be 1 row per month (i.e., if a phase
+        % is 6 months long (from start date to end date), then there should
+        % be 6 rows for that survey/phase)
+        warning off
+        rowTracker = 1;
+        [uniqueDatabasePrefixList, uniqueDatabasePrefixRows] = unique(queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix);
+        % for diagnosisPhaseNum = find(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DiagnosisCode, currentDiagnosisCode))'
+        for databasePrefixNum = uniqueDatabasePrefixRows'
+            monthsForPhase = datetime(queryList.projectDatabaseInfo.(string(currentProject)).data.StartDate(databasePrefixNum), 'Format','MM/yyyy') : calmonths(1) : datetime(queryList.projectDatabaseInfo.(string(currentProject)).data.EndDate(databasePrefixNum), 'Format','MM/yyyy');
+            kpis.surveyCompletion.(string(currentProject)).(string(currentDiagnosisCode)).ProjectName(rowTracker : rowTracker + length(monthsForPhase) - 1) = currentProject;
+            kpis.surveyCompletion.(string(currentProject)).(string(currentDiagnosisCode)).DiagnosisCode(rowTracker : rowTracker + length(monthsForPhase) - 1) = currentDiagnosisCode;
+            kpis.surveyCompletion.(string(currentProject)).(string(currentDiagnosisCode)).DatabasePrefix(rowTracker : rowTracker + length(monthsForPhase) - 1) = queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix(databasePrefixNum);
+            kpis.surveyCompletion.(string(currentProject)).(string(currentDiagnosisCode)).SurveyGroupName(rowTracker : rowTracker + length(monthsForPhase) - 1) = unique(outputDataCell.(string(currentDiagnosisCode)).(string(variationTypeList(1)))(matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationTypeList(1)))(:, matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationTypeList(1)))(1,:), 'DatabasePrefix')), queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix(databasePrefixNum)), matches(outputDataCell.(string(currentDiagnosisCode)).(string(variationTypeList(1)))(1,:), 'SurveyGroupName')));
+            kpis.surveyCompletion.(string(currentProject)).(string(currentDiagnosisCode)).PhaseStatus(rowTracker : rowTracker + length(monthsForPhase) - 1) = queryList.projectDatabaseInfo.(string(currentProject)).data.PhaseStatus(databasePrefixNum);
+            kpis.surveyCompletion.(string(currentProject)).(string(currentDiagnosisCode)).LastPageName(rowTracker : rowTracker + length(monthsForPhase) - 1) = repmat(queryList.projectDatabaseInfo.(string(currentProject)).data.PageHeader(max(find(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix, queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix(databasePrefixNum))))), length(monthsForPhase), 1);
+            kpis.surveyCompletion.(string(currentProject)).(string(currentDiagnosisCode)).MonthYear(rowTracker : rowTracker + length(monthsForPhase) - 1) = cellstr(monthsForPhase');
+            validStatusCodes = table2array(queryList.projectDatabaseInfo.(string(currentProject)).data(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix, kpis.surveyCompletion.(string(currentProject)).(string(currentDiagnosisCode)).DatabasePrefix(rowTracker)) & contains(queryList.projectDatabaseInfo.(string(currentProject)).data.PageHeader, extract(kpis.surveyCompletion.(string(currentProject)).(string(currentDiagnosisCode)).LastPageName(rowTracker), '[' + digitsPattern + ']')), matches(queryList.projectDatabaseInfo.(string(currentProject)).data.Properties.VariableNames, tableTypeListStatuses.Completed)));
+            % calculate number of surveys completed
+            for rowNum = rowTracker : rowTracker + length(monthsForPhase) - 1
+                kpis.surveyCompletion.(string(currentProject)).(string(currentDiagnosisCode)).NumSurveysCompleted(rowNum) = sum(matches(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.DatabasePrefix, kpis.surveyCompletion.(string(currentProject)).(string(currentDiagnosisCode)).DatabasePrefix(rowNum)) & ... % rows with same DatabasePrefix
+                                                                                                                                any(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.(sprintf('pg%02s_SurveyStatus', string(extractBetween(kpis.surveyCompletion.(string(currentProject)).(string(currentDiagnosisCode)).LastPageName(rowTracker), '[', ']')))) == validStatusCodes, 2) & ... % rows with correct status code (completed)
+                                                                                                                                (month(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.(sprintf('pg%02s_LastActivityDate', string(extractBetween(kpis.surveyCompletion.(string(currentProject)).(string(currentDiagnosisCode)).LastPageName(rowTracker), '[', ']'))))) == month(datetime(kpis.surveyCompletion.(string(currentProject)).(string(currentDiagnosisCode)).MonthYear{rowNum}, 'InputFormat', 'MM/yyyy'))) & ... % rows with correct month
+                                                                                                                                (year(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.(sprintf('pg%02s_LastActivityDate', string(extractBetween(kpis.surveyCompletion.(string(currentProject)).(string(currentDiagnosisCode)).LastPageName(rowTracker), '[', ']'))))) == year(datetime(kpis.surveyCompletion.(string(currentProject)).(string(currentDiagnosisCode)).MonthYear{rowNum}, 'InputFormat', 'MM/yyyy'))) ); % rows with correct year
+            end
+            rowTracker = rowTracker + length(monthsForPhase);
+        end
+        % remove any rows that correspond to months in the future
+        kpis.surveyCompletion.(string(currentProject)).(string(currentDiagnosisCode))(datetime(kpis.surveyCompletion.(string(currentProject)).(string(currentDiagnosisCode)).MonthYear, 'InputFormat', 'MM/yyyy') > datetime('today'), :) = [];
+        warning on
+        
+        % - calculate the number of participants who fill out surveys after
+        % enrollment, by month (CUMULATIVLY SINCE ENROLLMENT START and DO 
+        % FOR EACH DIAGNOSIS CODE SEPERATELY *will be tricky, since NDB 
+        % enrollment survey contains enrollments for all NDB diagnosis codes) 
+        % (will be a line chart with a single line) -
+        % *have one set of rows that stores the number of participants who
+        % completed enrollment and another set of rows that stores the number
+        % of participants who have completed enrollment AND completed at
+        % least one survey
+        
+        kpis.enrolledAndParticipatedCount.(string(currentProject)).(string(currentDiagnosisCode)) = table('Size',[0,8], 'VariableTypes', {'cell','cell','cell','cell','cell','cell','cell','double'}, 'VariableNames', {'ProjectName','DiagnosisCode','DatabasePrefix','SurveyGroupName','PhaseStatus','LastPageName','MonthYear','NumSurveysCompleted'});
+        % initialize kpis.enrolledAndParticipatedCount.(string(currentProject)).(string(currentDiagnosisCode))
+        % by pulling Enrollment survey completion data from
+        % kpis.surveyCompletion.(string(currentProject)).(string(currentDiagnosisCode))
+        kpis.enrolledAndParticipatedCount.(string(currentProject)).(string(currentDiagnosisCode)) = kpis.surveyCompletion.(string(currentProject)).(string(currentDiagnosisCode))(matches(kpis.surveyCompletion.(string(currentProject)).(string(currentDiagnosisCode)).SurveyGroupName, 'Enrollment'), :);
+        % set the NumSurveysCompleted column as the cumulative sum of
+        % itself
+        kpis.enrolledAndParticipatedCount.(string(currentProject)).(string(currentDiagnosisCode)).NumSurveysCompleted = cumsum(kpis.enrolledAndParticipatedCount.(string(currentProject)).(string(currentDiagnosisCode)).NumSurveysCompleted);
+        % Add a column to indicate whether the row stores the number of
+        % enrollments OR the number of participants who completed their
+        % first survey
+        kpis.enrolledAndParticipatedCount.(string(currentProject)).(string(currentDiagnosisCode)) = addvars(kpis.enrolledAndParticipatedCount.(string(currentProject)).(string(currentDiagnosisCode)), repmat({'Enrolled'}, height(kpis.enrolledAndParticipatedCount.(string(currentProject)).(string(currentDiagnosisCode))), 1), 'Before', 'MonthYear', 'NewVariableNames', 'CountType');
+        % - create another set of rows that will store the sum (eventually 
+        % the cumulative sum) of participants that completed their first
+        % survey, by month -
+        % add two columns to the end of queryList.pageData.(...).(...).data
+        % that 1) indicate whether the last page of the survey was
+        % completed and 2) the date the last page of the survey was 
+        % interacted with 
+        queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.FinalPageCompleted = false(height(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data), 1);
+        queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.FinalPageActivityDate = NaT(height(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data), 1);
+        for databasePrefixNum = uniqueDatabasePrefixRows'
+            % if current databasePrefixNum corresponds to Enrollment
+            % survey, skip 
+            if ~any(matches(kpis.surveyCompletion.(string(currentProject)).(string(currentDiagnosisCode)).SurveyGroupName(matches(kpis.surveyCompletion.(string(currentProject)).(string(currentDiagnosisCode)).DatabasePrefix, queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix(databasePrefixNum))), 'Enrollment'))
+                % determine the status code(s) for the current DatabasePrefix
+                % that indicate the survey was completed
+                validStatusCodes = table2array(queryList.projectDatabaseInfo.(string(currentProject)).data(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix, queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix(databasePrefixNum)) & contains(queryList.projectDatabaseInfo.(string(currentProject)).data.PageHeader, '[1]'), matches(queryList.projectDatabaseInfo.(string(currentProject)).data.Properties.VariableNames, tableTypeListStatuses.Completed)));
+                % assign true values to FinalPageCompleted where the row both
+                % corresponds to the current DatabasePrefix AND the
+                % SurveyStatus of the final surveys page is marked as completed
+                queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.FinalPageCompleted(any(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.(sprintf('pg%02s_SurveyStatus', string(extractBetween(queryList.projectDatabaseInfo.(string(currentProject)).data.PageHeader(max(find(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix, queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix(databasePrefixNum))))), '[', ']')))) == validStatusCodes, 2)) = true;
+                % assign LastActivityDate values for rows corresponding to the
+                % current DatabasePrefix to FinalPageActivityDate
+                queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.FinalPageActivityDate(matches(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.DatabasePrefix, queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix(databasePrefixNum))) = queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.(sprintf('pg%02s_LastActivityDate', string(extractBetween(queryList.projectDatabaseInfo.(string(currentProject)).data.PageHeader(max(find(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix, queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix(databasePrefixNum))))), '[', ']'))))(matches(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.DatabasePrefix, queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix(databasePrefixNum)));
+            end
+        end
+
+        % - extract the dates that correspond to each participants first 
+        % completed survey -
+        [uniqueParticipantList, uniqueParticipantRows] = unique(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.UserID);
+        % extract the earliest date that each participant completed a
+        % survey (for participants that didn't complete a survey, put NaT)
+        uniqueParticipantFistSurveyCompletedDate = NaT(length(uniqueParticipantList), 1);
+        for participantNum = 1:length(uniqueParticipantList)
+            if ~isempty(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.FinalPageActivityDate(matches(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.UserID, uniqueParticipantList(participantNum)) & queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.FinalPageCompleted))
+                uniqueParticipantFistSurveyCompletedDate(participantNum) = min(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.FinalPageActivityDate(matches(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.UserID, uniqueParticipantList(participantNum)) & queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.FinalPageCompleted), [], 'omitnat');
+            end
+        end
+
+        % for each month, sum the number of participants who completed a 
+        % survey for the first time
+        kpis.enrolledAndParticipatedCount.(string(currentProject)).(string(currentDiagnosisCode))(height(kpis.enrolledAndParticipatedCount.(string(currentProject)).(string(currentDiagnosisCode))) + 1 : 2 * height(kpis.enrolledAndParticipatedCount.(string(currentProject)).(string(currentDiagnosisCode))), :) = kpis.enrolledAndParticipatedCount.(string(currentProject)).(string(currentDiagnosisCode));
+        % change the CountType for the new rows to say "FirstSurveyCompleted"
+        kpis.enrolledAndParticipatedCount.(string(currentProject)).(string(currentDiagnosisCode)).CountType((height(kpis.enrolledAndParticipatedCount.(string(currentProject)).(string(currentDiagnosisCode))) / 2) + 1 : end) = {'FirstSurveyCompleted'};
+        % wipe NumSurveysCompleted (for solidarity)
+        kpis.enrolledAndParticipatedCount.(string(currentProject)).(string(currentDiagnosisCode)).NumSurveysCompleted((height(kpis.enrolledAndParticipatedCount.(string(currentProject)).(string(currentDiagnosisCode))) / 2) + 1 : end) = 0;
+        % sum (not cumulative sum, yet) the number of participants who
+        % completed their first survey, by month
+        for rowNum = (height(kpis.enrolledAndParticipatedCount.(string(currentProject)).(string(currentDiagnosisCode))) / 2) + 1 : height(kpis.enrolledAndParticipatedCount.(string(currentProject)).(string(currentDiagnosisCode)))
+            kpis.enrolledAndParticipatedCount.(string(currentProject)).(string(currentDiagnosisCode)).NumSurveysCompleted(rowNum) = sum((month(uniqueParticipantFistSurveyCompletedDate) == month(datetime(kpis.enrolledAndParticipatedCount.(string(currentProject)).(string(currentDiagnosisCode)).MonthYear{rowNum}, 'InputFormat', 'MM/yyyy'))) & ... % rows with correct month
+                                                                                                                                        (year(uniqueParticipantFistSurveyCompletedDate) == year(datetime(kpis.enrolledAndParticipatedCount.(string(currentProject)).(string(currentDiagnosisCode)).MonthYear{rowNum}, 'InputFormat', 'MM/yyyy'))), [], 'omitnan'); % rows with correct year
+        end
+        % evaluate the cumulative sum of the first survey completed
+        kpis.enrolledAndParticipatedCount.(string(currentProject)).(string(currentDiagnosisCode)).NumSurveysCompleted((height(kpis.enrolledAndParticipatedCount.(string(currentProject)).(string(currentDiagnosisCode))) / 2) + 1 : end) = cumsum(kpis.enrolledAndParticipatedCount.(string(currentProject)).(string(currentDiagnosisCode)).NumSurveysCompleted((height(kpis.enrolledAndParticipatedCount.(string(currentProject)).(string(currentDiagnosisCode))) / 2) + 1 : end));
+        
+        % - create a key that stores which DatabasePrefixes go with which SurveyGroupNames -
+        groupKeyTable.(string(currentDiagnosisCode)) = addvars(groupKeyTable.(string(currentDiagnosisCode)), cell(height(groupKeyTable.(string(currentDiagnosisCode))), 1), 'NewVariableName', 'DatabasePrefixes'); 
+        for surveyGroupNum = 1:height(groupKeyTable.(string(currentDiagnosisCode)))
+            groupKeyTable.(string(currentDiagnosisCode)).DatabasePrefixes{surveyGroupNum} = unique(queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix(cellfun(@any, regexp(queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix, groupKeyTable.(string(currentDiagnosisCode)).DatabasePrefixToken(surveyGroupNum))) & matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DiagnosisCode, currentDiagnosisCode)));
+        end
+
+        %%
+        % - calculate a breakdown of participant demographics by survey
+        % group -
+        % *include total unique participants in survey group (pull from 
+        % pageData, age bracket breakdown (10-year bins, start at 0-9), sex
+        % breakdown, gender breakdown (Female, Male, Non-conforming, Other),
+        % ethnicity breakdown (white vs non-white), education breakdown 
+        % (# years of schooling), and Dupuytrens status breakdown (control 
+        % vs not control)
+  
+        % - Initialize the Demographics tables -
+        fprintf('Calculating Demographics Breakdown...\n');
+        tic;
+        % For each combination of SurveyGroupName and MonthYear, find the
+        % unique set of participants that meet the combo criteria
+        surveyGroupMonthYearCombo = combinations(groupKeyTable.(string(currentDiagnosisCode)).SurveyGroup', monthYearList);
+        surveyGroupMonthYearCombo.Properties.VariableNames = {'SurveyGroupName','MonthYear'};
+        % initialize demographics tables
+        [demoBins, kpis.demographics] = deal(struct);
+        % AGE
+        demoBins.Age = {'0-9','10-19','20-29','30-39','40-49','50-59','60-69','70-79','80-89','90-99','100+','Total'};
+        demoBins.AgeClean = demoBins.Age;
+        kpis.demographics.Age.(string(currentProject)).(string(currentDiagnosisCode)) = cell2table([repmat([currentProject, currentDiagnosisCode], height(surveyGroupMonthYearCombo) * length(demoBins.Age), 1), table2cell(combinations(groupKeyTable.(string(currentDiagnosisCode)).SurveyGroup', monthYearList, demoBins.Age)), repmat({NaN}, height(surveyGroupMonthYearCombo) * length(demoBins.Age), 1)], 'VariableNames', {'ProjectName','DiagnosisCode','SurveyGroupName','MonthYear','Age','Total'});
+        % SEX
+        demoBins.Sex = {'0','1','Total'};
+        demoBins.SexClean = {'Female','Male','Total'};
+        kpis.demographics.Sex.(string(currentProject)).(string(currentDiagnosisCode)) = cell2table([repmat([currentProject, currentDiagnosisCode], height(surveyGroupMonthYearCombo) * length(demoBins.Sex), 1), table2cell(combinations(groupKeyTable.(string(currentDiagnosisCode)).SurveyGroup', monthYearList, demoBins.Sex)), repmat({NaN},  height(surveyGroupMonthYearCombo) * length(demoBins.Sex), 1)], 'VariableNames', {'ProjectName','DiagnosisCode','SurveyGroupName','MonthYear','Sex','Total'});
+        % GENDER
+        demoBins.Gender = {'0','1','2','3','Total'};
+        demoBins.GenderClean = {'Female','Male','Non-Conforming','Other','Total'};
+        kpis.demographics.Gender.(string(currentProject)).(string(currentDiagnosisCode)) = cell2table([repmat([currentProject, currentDiagnosisCode], height(surveyGroupMonthYearCombo) * length(demoBins.Gender), 1), table2cell(combinations(groupKeyTable.(string(currentDiagnosisCode)).SurveyGroup', monthYearList, demoBins.Gender)), repmat({NaN},  height(surveyGroupMonthYearCombo) * length(demoBins.Gender), 1)], 'VariableNames', {'ProjectName','DiagnosisCode','SurveyGroupName','MonthYear','Gender','Total'});
+        % ETHNICITY
+        demoBins.Ethnicity = {'1','2-7','Total'};
+        demoBins.EthnicityClean = {'White','Non-White','Total'};
+        kpis.demographics.Ethnicity.(string(currentProject)).(string(currentDiagnosisCode)) = cell2table([repmat([currentProject, currentDiagnosisCode], height(surveyGroupMonthYearCombo) * length(demoBins.Ethnicity), 1), table2cell(combinations(groupKeyTable.(string(currentDiagnosisCode)).SurveyGroup', monthYearList, demoBins.Ethnicity)), repmat({NaN},  height(surveyGroupMonthYearCombo) * length(demoBins.Ethnicity), 1)], 'VariableNames', {'ProjectName','DiagnosisCode','SurveyGroupName','MonthYear','Ethnicity','Total'});
+        % EDUCATION LEVEL
+        demoBins.EducationLevel = [cellstr(string(0:18)),'Total'];
+        demoBins.EducationLevelClean = demoBins.EducationLevel;
+        kpis.demographics.EducationLevel.(string(currentProject)).(string(currentDiagnosisCode)) = cell2table([repmat([currentProject, currentDiagnosisCode], height(surveyGroupMonthYearCombo) * length(demoBins.EducationLevel), 1), table2cell(combinations(groupKeyTable.(string(currentDiagnosisCode)).SurveyGroup', monthYearList, demoBins.EducationLevel)), repmat({NaN},  height(surveyGroupMonthYearCombo) * length(demoBins.EducationLevel), 1)], 'VariableNames', {'ProjectName','DiagnosisCode','SurveyGroupName','MonthYear','EducationLevel','Total'});
+        % DUPUYTRENS STATUS
+        demoBins.DupuytrensStatus = {'0','1','Total'};
+        demoBins.DupuytrensStatusClean = {'DUP Control','DUP Disease','Total'};
+        kpis.demographics.DupuytrensStatus.(string(currentProject)).(string(currentDiagnosisCode)) = cell2table([repmat([currentProject, currentDiagnosisCode], height(surveyGroupMonthYearCombo) * length(demoBins.DupuytrensStatus), 1), table2cell(combinations(groupKeyTable.(string(currentDiagnosisCode)).SurveyGroup', monthYearList, demoBins.DupuytrensStatus)), repmat({NaN},  height(surveyGroupMonthYearCombo) * length(demoBins.DupuytrensStatus), 1)], 'VariableNames', {'ProjectName','DiagnosisCode','SurveyGroupName','MonthYear','DupuytrensStatus','Total'});
+        % demographics var info:
+        %   -UserID: natalog.GUID
+        %   -DOB: date of birth; natalog.dob
+        %   -Sex: 0=female, 1=male; natalog.sex
+        %   -Gender: 0=female, 1=male, 2=non-conforming, 3=other; fixed.genderid
+        %   -Ethnicity: 1=white, 2-7=not white; natalog.ethnic
+        %   -EducationLevel: #=# of years of school; natalog.edlevel
+        %   -ICQSource: initial contact source code 
+        %   -ICSSourceVLabel: initial contact source label
+        %   -DiagnosisCode: diagnosis code; natalog.diagnosis
+        %   -ProjectName: the project that the participant is enrolled in
+        %   -DupuytrensStatus: 0=have DUP diagnosis, but are control; 1=have DUP diagnosis, and actually have DUP
+        
+        for sgmycNum = 1:height(surveyGroupMonthYearCombo)
+            % find the rows of participants that engaged with a survey
+            % during the month of interest AND where that row corresponds
+            % to a DatabasePrefix that belongs to the current
+            % SurveyGroupName
+            validParticipantList.UserID = unique(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.UserID(matches(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.DatabasePrefix, groupKeyTable.(string(currentDiagnosisCode)).DatabasePrefixes{matches(groupKeyTable.(string(currentDiagnosisCode)).SurveyGroup, surveyGroupMonthYearCombo.SurveyGroupName(sgmycNum))}) & any(isbetween(table2array(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data(:, endsWith(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.Properties.VariableNames, 'LastActivityDate'))), datetime(surveyGroupMonthYearCombo.MonthYear(sgmycNum), 'InputFormat', 'MM/yyyy'), datetime(surveyGroupMonthYearCombo.MonthYear(sgmycNum), 'InputFormat', 'MM/yyyy', 'Format', 'dd-MMM-uuuu HH:mm:ss') + calmonths(1) - seconds(1)), 2)));
+            for demoTypeName = fieldnames(kpis.demographics)'
+                switch string(demoTypeName)
+                    case 'Age'
+                        % calculate the ages of participants in validParticipantList
+                        % at the time they took the survey (go off of month, round
+                        % down to nearest year)
+                        validParticipantList.AgeAtTimeOfSurvey = calyears(between(queryList.demographics.data.DOB(matches(queryList.demographics.data.UserID, validParticipantList.UserID)), datetime(kpis.demographics.Age.(string(currentProject)).(string(currentDiagnosisCode)).MonthYear(rowNum), 'InputFormat', 'MM/yyyy'), 'years'));
+                        for ageGroupNum = 1:length(demoBins.Age)
+                            if contains(demoBins.Age(ageGroupNum), '-')
+                                currentAgeRange = [str2double(extractBefore(demoBins.Age(ageGroupNum), '-')), str2double(extractAfter(demoBins.Age(ageGroupNum), '-'))];
+                            elseif contains(demoBins.Age(ageGroupNum), '+')
+                                currentAgeRange = [str2double(extractBefore(demoBins.Age(ageGroupNum), '+')), 300]; % assuming by the time Forward ends, humans haven't achieved the capability of living past 300 years old...
+                            else % if 'Total'...
+                                currentAgeRange = [0,1000]; % include all ages to calculate total
+                            end
+                            kpis.demographics.Age.(string(currentProject)).(string(currentDiagnosisCode)).Total(matches(kpis.demographics.Age.(string(currentProject)).(string(currentDiagnosisCode)).SurveyGroupName, surveyGroupMonthYearCombo.SurveyGroupName(sgmycNum)) & matches(kpis.demographics.Age.(string(currentProject)).(string(currentDiagnosisCode)).MonthYear, surveyGroupMonthYearCombo.MonthYear(sgmycNum)) & matches(kpis.demographics.Age.(string(currentProject)).(string(currentDiagnosisCode)).Age, demoBins.Age(ageGroupNum))) = sum(isbetween(validParticipantList.AgeAtTimeOfSurvey, currentAgeRange(1), currentAgeRange(2)));
+                        end
+                    case 'Ethnicity'
+                        % retrieve ethnicity
+                        validParticipantList.(string(demoTypeName)) = queryList.demographics.data.(string(demoTypeName))(matches(queryList.demographics.data.UserID, validParticipantList.UserID));
+                        for demoTypeGroupNum = 1:length(demoBins.(string(demoTypeName)))
+                            if contains(demoBins.(string(demoTypeName))(demoTypeGroupNum), '-')
+                                currentEthnicityRange = [str2double(extractBefore(demoBins.(string(demoTypeName))(demoTypeGroupNum), '-')), str2double(extractAfter(demoBins.(string(demoTypeName))(demoTypeGroupNum), '-'))];
+                            elseif ~strcmp(demoBins.(string(demoTypeName))(demoTypeGroupNum), 'Total')
+                                currentEthnicityRange = repmat(str2double(extract(demoBins.(string(demoTypeName))(demoTypeGroupNum), digitsPattern)), 1, 2); % assuming by the time Forward ends, humans haven't achieved the capability of living past 300 years old...
+                            else % if 'Total'...
+                                currentEthnicityRange = [1,1000]; % include all ethnicity codes to calculate total
+                            end
+                            kpis.demographics.(string(demoTypeName)).(string(currentProject)).(string(currentDiagnosisCode)).Total(matches(kpis.demographics.(string(demoTypeName)).(string(currentProject)).(string(currentDiagnosisCode)).SurveyGroupName, surveyGroupMonthYearCombo.SurveyGroupName(sgmycNum)) & matches(kpis.demographics.(string(demoTypeName)).(string(currentProject)).(string(currentDiagnosisCode)).MonthYear, surveyGroupMonthYearCombo.MonthYear(sgmycNum)) & matches(kpis.demographics.(string(demoTypeName)).(string(currentProject)).(string(currentDiagnosisCode)).(string(demoTypeName)), demoBins.(string(demoTypeName))(demoTypeGroupNum))) = sum(isbetween(validParticipantList.(string(demoTypeName)), currentEthnicityRange(1), currentEthnicityRange(2)));
+                        end 
+                    otherwise
+                        % retrieve sex, gender, education level, and 
+                        % dupuytrens status
+                        validParticipantList.(string(demoTypeName)) = queryList.demographics.data.(string(demoTypeName))(matches(queryList.demographics.data.UserID, validParticipantList.UserID));
+                        for demoTypeGroupNum = 1:length(demoBins.(string(demoTypeName)))
+                            if ~strcmp(demoBins.(string(demoTypeName))(demoTypeGroupNum), 'Total') % if not 'Total'
+                                kpis.demographics.(string(demoTypeName)).(string(currentProject)).(string(currentDiagnosisCode)).Total(matches(kpis.demographics.(string(demoTypeName)).(string(currentProject)).(string(currentDiagnosisCode)).SurveyGroupName, surveyGroupMonthYearCombo.SurveyGroupName(sgmycNum)) & matches(kpis.demographics.(string(demoTypeName)).(string(currentProject)).(string(currentDiagnosisCode)).MonthYear, surveyGroupMonthYearCombo.MonthYear(sgmycNum)) & matches(kpis.demographics.(string(demoTypeName)).(string(currentProject)).(string(currentDiagnosisCode)).(string(demoTypeName)), demoBins.(string(demoTypeName))(demoTypeGroupNum))) = sum(validParticipantList.(string(demoTypeName)) == str2double(demoBins.(string(demoTypeName))(demoTypeGroupNum)));
+                            else % if 'Total'...
+                                if strcmp(demoTypeName, 'Sex') & (sgmycNum == 33)
+                                    test = 1;
+                                    % a bunch of participants that engaged
+                                    % with a survey during the month of
+                                    % interest for the survey of interest
+                                    % don't have rows in the
+                                    % queryList.demographics.data table???
+                                    % ADAM IS WORKING ON UPDATING THE VIEW
+                                    % TO BE MORE INCLUSIVE
+                                    error('A bunch of participants that engaged with a survey during the month of interest for the survey of interest don''t have rows in the queryList.demographics.data table. ADAM IS WORKING ON UPDATING THE VIEW TO BE MORE INCLUSIVE');
+                                end
+                                kpis.demographics.(string(demoTypeName)).(string(currentProject)).(string(currentDiagnosisCode)).Total(matches(kpis.demographics.(string(demoTypeName)).(string(currentProject)).(string(currentDiagnosisCode)).SurveyGroupName, surveyGroupMonthYearCombo.SurveyGroupName(sgmycNum)) & matches(kpis.demographics.(string(demoTypeName)).(string(currentProject)).(string(currentDiagnosisCode)).MonthYear, surveyGroupMonthYearCombo.MonthYear(sgmycNum)) & matches(kpis.demographics.(string(demoTypeName)).(string(currentProject)).(string(currentDiagnosisCode)).(string(demoTypeName)), demoBins.(string(demoTypeName))(demoTypeGroupNum))) = length(validParticipantList.(string(demoTypeName)));
+                            end
+                        end 
+                end
+            end
+        end
+
+        % replace computer-readable labels for demographics with
+        % human-readable labels (e.g., Ethnicity '1','2-7' become
+        % 'White','Non-White')
+        for demoTypeName = fieldnames(kpis.demographics)'
+            for labelNum = 1:length(demoBins.(sprintf('%sClean', string(demoTypeName))))
+                kpis.demographics.(string(demoTypeName)).(string(currentProject)).(string(currentDiagnosisCode)).(string(demoTypeName))(matches(kpis.demographics.(string(demoTypeName)).(string(currentProject)).(string(currentDiagnosisCode)).(string(demoTypeName)), demoBins.(string(demoTypeName))(labelNum))) = demoBins.(sprintf('%sClean', string(demoTypeName)))(labelNum);
+            end
+        end
+        fprintf('Calculated Demographics Breakdown...%02gh %02gm %02gs\n', round(toc/3600), round(rem(toc,3600)/60), round(rem(rem(toc,3600),60)))
+        %%
+        % - calculate total surveys sent/started/completed for this 
+        % week/current phase/all-time for each survey group -
+        % *SET NaN TO ALL THISWEEK/SENT ROWS AND ENROLLMENT/THISPHASE/SENT ROW.
+        fprintf('Calculating Aggregate KPIs (Sent/Started/Completed x ThisWeek/ThisPhase/AllTime)...\n');
+        tic;
+        aggregateCombos = combinations(groupKeyTable.(string(currentDiagnosisCode)).SurveyGroup', {'ThisWeek', 'ThisPhase', 'AllTime'}, {'Sent','Started','Completed'});
+        kpis.aggregates.(string(currentProject)).(string(currentDiagnosisCode)) = cell2table([repmat([currentProject, currentDiagnosisCode], height(aggregateCombos), 1), table2cell(aggregateCombos), repmat({NaN}, height(aggregateCombos), 1)], 'VariableNames', {'ProjectName','DiagnosisCode','SurveyGroupName','Period','SurveyStatus','Total'});
+        for rowNum = 1:height(kpis.aggregates.(string(currentProject)).(string(currentDiagnosisCode)))
+            switch kpis.aggregates.(string(currentProject)).(string(currentDiagnosisCode)).Period{rowNum}
+                case 'ThisWeek'
+                    % let the survey interaction window only include
+                    % the past week
+                    validSurveys = groupKeyTable.(string(currentDiagnosisCode)).DatabasePrefixes{matches(groupKeyTable.(string(currentDiagnosisCode)).SurveyGroup, kpis.aggregates.(string(currentProject)).(string(currentDiagnosisCode)).SurveyGroupName{rowNum})}(datetime('today') - calweeks(1) < datetime(queryList.projectDatabaseInfo.(string(currentProject)).data.EndDate(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DiagnosisCode, currentDiagnosisCode) & matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix, groupKeyTable.(string(currentDiagnosisCode)).DatabasePrefixes{matches(groupKeyTable.(string(currentDiagnosisCode)).SurveyGroup, kpis.aggregates.(string(currentProject)).(string(currentDiagnosisCode)).SurveyGroupName{rowNum})}) & startsWith(queryList.projectDatabaseInfo.(string(currentProject)).data.PageHeader, '[1]'))));
+                    if isempty(validSurveys)
+                        kpis.aggregates.(string(currentProject)).(string(currentDiagnosisCode)).Total(rowNum) = 0;
+                    else
+                        switch kpis.aggregates.(string(currentProject)).(string(currentDiagnosisCode)).SurveyStatus{rowNum}
+                            case 'Sent'
+                                % set all Sent/ThisWeek row totals to NaN
+                                kpis.aggregates.(string(currentProject)).(string(currentDiagnosisCode)).Total(rowNum) = NaN;
+                            case 'Started'
+                                warning('Waiting to see if Adam wants me to keep Started/ThisWeek totals');
+                                % identify which records were started in
+                                % the past week by using the
+                                % 'SurveyStartedWithinWeek' column in
+                                % pageData
+
+                                % determine the 'Started' status codes for
+                                % the validSurveys
+                                validStatusCodes = table2array(queryList.projectDatabaseInfo.(string(currentProject)).data(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix, validSurveys) & contains(queryList.projectDatabaseInfo.(string(currentProject)).data.PageHeader, '[1]'), matches(queryList.projectDatabaseInfo.(string(currentProject)).data.Properties.VariableNames, tableTypeListStatuses.Started)));
+                                % sum the number of surveys that were
+                                % started for the validSurveys. A survey is 
+                                % determined to only be started if any of
+                                % the pages have a 'started'
+                                % validStatusCode
+                                isPageStartedLogical = false(height(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data), sum(endsWith(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.Properties.VariableNames, 'SurveyStatus')));
+                                for validSurveyNum = 1:length(validSurveys) % if there is more than one active survey for the current phase and survey group name, this loop will check each status code for each validSurvey. (i.e., if two valid surveys, but one has started status code of 569 and other is 69, then this loop will check for 569 for first survey records, and 69 for second survey records)  
+                                    isPageStartedLogical = isPageStartedLogical | (repmat(matches(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.DatabasePrefix, validSurveys(validSurveyNum)), 1, sum(endsWith(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.Properties.VariableNames, 'SurveyStatus'))) & ismember(table2array(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data(:, endsWith(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.Properties.VariableNames, 'SurveyStatus'))), validStatusCodes(validSurveyNum,:)));
+                                end
+                                kpis.aggregates.(string(currentProject)).(string(currentDiagnosisCode)).Total(rowNum) = sum(any(isPageStartedLogical, 2));
+                            case 'Completed'
+                                % determine the 'Completed' status codes for
+                                % the validSurveys
+                                validStatusCodes = table2array(queryList.projectDatabaseInfo.(string(currentProject)).data(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix, validSurveys) & contains(queryList.projectDatabaseInfo.(string(currentProject)).data.PageHeader, '[1]'), matches(queryList.projectDatabaseInfo.(string(currentProject)).data.Properties.VariableNames, tableTypeListStatuses.Completed)));
+                                % determine the final page number for the
+                                % validSurveys
+                                validSurveyFinalPage = zeros(length(validSurveys), 1);
+                                for validSurveyNum = 1:length(validSurveys)
+                                    validSurveyFinalPage(validSurveyNum) = str2double(extractBetween(queryList.projectDatabaseInfo.(string(currentProject)).data.PageHeader(max(find(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix, validSurveys(validSurveyNum))))), '[', ']'));
+                                end
+                                % sum the number of surveys that were
+                                % completed for the validSurveys. A survey is 
+                                % determined to only be completed if ALL of
+                                % the pages have a 'completed'
+                                % validStatusCode AND they must have been
+                                % completed in the past week
+                                isPageStartedLogical = false(height(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data), 1);
+                                for validSurveyNum = 1:length(validSurveys) % if there is more than one active survey for the current phase and survey group name, this loop will check each status code for each validSurvey. (i.e., if two valid surveys, but one has started status code of 563 and other is 63, then this loop will check for 563 for first survey records, and 63 for second survey records)  
+                                    isPageStartedLogical = isPageStartedLogical | (all((repmat(matches(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.DatabasePrefix, validSurveys(validSurveyNum)), 1, sum(endsWith(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.Properties.VariableNames, 'SurveyStatus'))) & ismember(table2array(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data(:, endsWith(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.Properties.VariableNames, 'SurveyStatus'))), validStatusCodes(validSurveyNum,:))) == [ones(1, validSurveyFinalPage(validSurveyNum)), zeros(1, sum(endsWith(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.Properties.VariableNames, 'SurveyStatus')) - validSurveyFinalPage(validSurveyNum))], 2) & (datetime('today') - calweeks(1) < max(table2array(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data(:, endsWith(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.Properties.VariableNames, 'LastActivityDate'))), [], 2, 'omitnat')));
+                                end
+                                kpis.aggregates.(string(currentProject)).(string(currentDiagnosisCode)).Total(rowNum) = sum(isPageStartedLogical);
+                        end
+                    end
+                case 'ThisPhase'
+                    % let the survey interaction window only include
+                    % surveys that haven't passed the Survey's End Date.
+                    % of the surveys that belong to the current 
+                    % SurveyGroupName, determine which one(s) are still 
+                    % active via the survey's end date. SET NaN TO ALL
+                    % THISWEEK/SENT ROWS AND ENROLLMENT/THISPHASE/SENT ROW.
+                    validSurveys = groupKeyTable.(string(currentDiagnosisCode)).DatabasePrefixes{matches(groupKeyTable.(string(currentDiagnosisCode)).SurveyGroup, kpis.aggregates.(string(currentProject)).(string(currentDiagnosisCode)).SurveyGroupName{rowNum})}(isbetween(datetime('today'), datetime(queryList.projectDatabaseInfo.(string(currentProject)).data.StartDate(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DiagnosisCode, currentDiagnosisCode) & matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix, groupKeyTable.(string(currentDiagnosisCode)).DatabasePrefixes{matches(groupKeyTable.(string(currentDiagnosisCode)).SurveyGroup, kpis.aggregates.(string(currentProject)).(string(currentDiagnosisCode)).SurveyGroupName{rowNum})}) & startsWith(queryList.projectDatabaseInfo.(string(currentProject)).data.PageHeader, '[1]'))), datetime(queryList.projectDatabaseInfo.(string(currentProject)).data.EndDate(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DiagnosisCode, currentDiagnosisCode) & matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix, groupKeyTable.(string(currentDiagnosisCode)).DatabasePrefixes{matches(groupKeyTable.(string(currentDiagnosisCode)).SurveyGroup, kpis.aggregates.(string(currentProject)).(string(currentDiagnosisCode)).SurveyGroupName{rowNum})}) & startsWith(queryList.projectDatabaseInfo.(string(currentProject)).data.PageHeader, '[1]')))));
+                    if isempty(validSurveys)
+                        kpis.aggregates.(string(currentProject)).(string(currentDiagnosisCode)).Total(rowNum) = 0;
+                    else
+                        switch kpis.aggregates.(string(currentProject)).(string(currentDiagnosisCode)).SurveyStatus{rowNum}
+                            case 'Sent'
+                                if strcmp(kpis.aggregates.(string(currentProject)).(string(currentDiagnosisCode)).SurveyGroupName{rowNum}, 'Enrollment')
+                                    kpis.aggregates.(string(currentProject)).(string(currentDiagnosisCode)).Total(rowNum) = NaN;
+                                else
+                                    kpis.aggregates.(string(currentProject)).(string(currentDiagnosisCode)).Total(rowNum) = sum(matches(queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data.DatabasePrefix, validSurveys));
+                                end
+                            case 'Started'
+                                % determine the 'Started' status codes for
+                                % the validSurveys
+                                validStatusCodes = table2array(queryList.projectDatabaseInfo.(string(currentProject)).data(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix, validSurveys) & contains(queryList.projectDatabaseInfo.(string(currentProject)).data.PageHeader, '[1]'), matches(queryList.projectDatabaseInfo.(string(currentProject)).data.Properties.VariableNames, tableTypeListStatuses.Started)));
+                                % sum the number of surveys that were
+                                % started for the validSurveys. A survey is 
+                                % determined to only be started if any of
+                                % the pages have a 'started'
+                                % validStatusCode
+                                isPageStartedLogical = false(height(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data), sum(endsWith(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.Properties.VariableNames, 'SurveyStatus')));
+                                for validSurveyNum = 1:length(validSurveys) % if there is more than one active survey for the current phase and survey group name, this loop will check each status code for each validSurvey. (i.e., if two valid surveys, but one has started status code of 569 and other is 69, then this loop will check for 569 for first survey records, and 69 for second survey records)  
+                                    isPageStartedLogical = isPageStartedLogical | (repmat(matches(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.DatabasePrefix, validSurveys(validSurveyNum)), 1, sum(endsWith(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.Properties.VariableNames, 'SurveyStatus'))) & ismember(table2array(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data(:, endsWith(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.Properties.VariableNames, 'SurveyStatus'))), validStatusCodes(validSurveyNum,:)));
+                                end
+                                if strcmp(kpis.aggregates.(string(currentProject)).(string(currentDiagnosisCode)).SurveyGroupName{rowNum}, 'Enrollment')
+                                    kpis.aggregates.(string(currentProject)).(string(currentDiagnosisCode)).Total(rowNum) = NaN;
+                                else
+                                    kpis.aggregates.(string(currentProject)).(string(currentDiagnosisCode)).Total(rowNum) = sum(any(isPageStartedLogical, 2));
+                                end
+                            case 'Completed'
+                                % determine the 'Completed' status codes for
+                                % the validSurveys
+                                validStatusCodes = table2array(queryList.projectDatabaseInfo.(string(currentProject)).data(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix, validSurveys) & contains(queryList.projectDatabaseInfo.(string(currentProject)).data.PageHeader, '[1]'), matches(queryList.projectDatabaseInfo.(string(currentProject)).data.Properties.VariableNames, tableTypeListStatuses.Completed)));
+                                % determine the final page number for the
+                                % validSurveys
+                                validSurveyFinalPage = zeros(length(validSurveys), 1);
+                                for validSurveyNum = 1:length(validSurveys)
+                                    validSurveyFinalPage(validSurveyNum) = str2double(extractBetween(queryList.projectDatabaseInfo.(string(currentProject)).data.PageHeader(max(find(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix, validSurveys(validSurveyNum))))), '[', ']'));
+                                end
+                                % sum the number of surveys that were
+                                % completed for the validSurveys. A survey is 
+                                % determined to only be completed if ALL of
+                                % the pages have a 'completed'
+                                % validStatusCode
+                                isPageStartedLogical = false(height(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data), 1);
+                                for validSurveyNum = 1:length(validSurveys) % if there is more than one active survey for the current phase and survey group name, this loop will check each status code for each validSurvey. (i.e., if two valid surveys, but one has started status code of 563 and other is 63, then this loop will check for 563 for first survey records, and 63 for second survey records)  
+                                    isPageStartedLogical = isPageStartedLogical | all((repmat(matches(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.DatabasePrefix, validSurveys(validSurveyNum)), 1, sum(endsWith(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.Properties.VariableNames, 'SurveyStatus'))) & ismember(table2array(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data(:, endsWith(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.Properties.VariableNames, 'SurveyStatus'))), validStatusCodes(validSurveyNum,:))) == [ones(1, validSurveyFinalPage(validSurveyNum)), zeros(1, sum(endsWith(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.Properties.VariableNames, 'SurveyStatus')) - validSurveyFinalPage(validSurveyNum))], 2);
+                                end
+                                kpis.aggregates.(string(currentProject)).(string(currentDiagnosisCode)).Total(rowNum) = sum(isPageStartedLogical);
+                        end
+                    end
+                case 'AllTime'
+                    % look at all the surveys that belong to the current
+                    % SurveyGroupName
+                    validSurveys = groupKeyTable.(string(currentDiagnosisCode)).DatabasePrefixes{matches(groupKeyTable.(string(currentDiagnosisCode)).SurveyGroup, kpis.aggregates.(string(currentProject)).(string(currentDiagnosisCode)).SurveyGroupName{rowNum})};
+                    if isempty(validSurveys)
+                        kpis.aggregates.(string(currentProject)).(string(currentDiagnosisCode)).Total(rowNum) = 0;
+                    else
+                        switch kpis.aggregates.(string(currentProject)).(string(currentDiagnosisCode)).SurveyStatus{rowNum}
+                            case 'Sent'
+                                kpis.aggregates.(string(currentProject)).(string(currentDiagnosisCode)).Total(rowNum) = sum(matches(queryList.questionnairesSent.(string(currentProject)).(string(currentDiagnosisCode)).data.DatabasePrefix, validSurveys));
+                            case 'Started'
+                                % determine the 'Started' status codes for
+                                % the validSurveys
+                                validStatusCodes = table2array(queryList.projectDatabaseInfo.(string(currentProject)).data(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix, validSurveys) & contains(queryList.projectDatabaseInfo.(string(currentProject)).data.PageHeader, '[1]'), matches(queryList.projectDatabaseInfo.(string(currentProject)).data.Properties.VariableNames, tableTypeListStatuses.Started)));
+                                % sum the number of surveys that were
+                                % started for the validSurveys. A survey is 
+                                % determined to only be started if any of
+                                % the pages have a 'started'
+                                % validStatusCode
+                                isPageStartedLogical = false(height(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data), sum(endsWith(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.Properties.VariableNames, 'SurveyStatus')));
+                                for validSurveyNum = 1:length(validSurveys) % if there is more than one active survey for the current phase and survey group name, this loop will check each status code for each validSurvey. (i.e., if two valid surveys, but one has started status code of 569 and other is 69, then this loop will check for 569 for first survey records, and 69 for second survey records)  
+                                    isPageStartedLogical = isPageStartedLogical | (repmat(matches(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.DatabasePrefix, validSurveys(validSurveyNum)), 1, sum(endsWith(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.Properties.VariableNames, 'SurveyStatus'))) & ismember(table2array(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data(:, endsWith(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.Properties.VariableNames, 'SurveyStatus'))), validStatusCodes(validSurveyNum,:)));
+                                end
+                                kpis.aggregates.(string(currentProject)).(string(currentDiagnosisCode)).Total(rowNum) = sum(any(isPageStartedLogical, 2));
+                            case 'Completed'
+                                % determine the 'Completed' status codes for
+                                % the validSurveys
+                                validStatusCodes = table2array(queryList.projectDatabaseInfo.(string(currentProject)).data(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix, validSurveys) & contains(queryList.projectDatabaseInfo.(string(currentProject)).data.PageHeader, '[1]'), matches(queryList.projectDatabaseInfo.(string(currentProject)).data.Properties.VariableNames, tableTypeListStatuses.Completed)));
+                                % determine the final page number for the
+                                % validSurveys
+                                validSurveyFinalPage = zeros(length(validSurveys), 1);
+                                for validSurveyNum = 1:length(validSurveys)
+                                    validSurveyFinalPage(validSurveyNum) = str2double(extractBetween(queryList.projectDatabaseInfo.(string(currentProject)).data.PageHeader(max(find(matches(queryList.projectDatabaseInfo.(string(currentProject)).data.DatabasePrefix, validSurveys(validSurveyNum))))), '[', ']'));
+                                end
+                                % sum the number of surveys that were
+                                % completed for the validSurveys. A survey is 
+                                % determined to only be completed if ALL of
+                                % the pages have a 'completed'
+                                % validStatusCode
+                                isPageStartedLogical = false(height(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data), 1);
+                                for validSurveyNum = 1:length(validSurveys) % if there is more than one active survey for the current phase and survey group name, this loop will check each status code for each validSurvey. (i.e., if two valid surveys, but one has started status code of 563 and other is 63, then this loop will check for 563 for first survey records, and 63 for second survey records)  
+                                    isPageStartedLogical = isPageStartedLogical | all((repmat(matches(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.DatabasePrefix, validSurveys(validSurveyNum)), 1, sum(endsWith(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.Properties.VariableNames, 'SurveyStatus'))) & ismember(table2array(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data(:, endsWith(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.Properties.VariableNames, 'SurveyStatus'))), validStatusCodes(validSurveyNum,:))) == [ones(1, validSurveyFinalPage(validSurveyNum)), zeros(1, sum(endsWith(queryList.pageData.(string(currentProject)).(string(currentDiagnosisCode)).data.Properties.VariableNames, 'SurveyStatus')) - validSurveyFinalPage(validSurveyNum))], 2);
+                                end
+                                kpis.aggregates.(string(currentProject)).(string(currentDiagnosisCode)).Total(rowNum) = sum(isPageStartedLogical);
+                        end
+                    end
+            end
+        end
+        fprintf('Calculated Aggregate KPIs (Sent/Started/Completed x ThisWeek/ThisPhase/AllTime)...%02gh %02gm %02gs\n', round(toc/3600), round(rem(toc,3600)/60), round(rem(rem(toc,3600),60)))
+        %%
+    end
+
+    % --- Export all the stuff we just calculated to spreadsheet for PowerBI ---
+    % - Export each project's data to its own spreadsheet -
+    stuff
+    writecell(outputDataPowerBI, 'Dupuytrens KPI for Power BI.xlsx', 'Sheet','phaseAggregates');
+
+    % - Export each project's data to a spreadsheet that contains data for
+    % all projects -
+    stuff
+end
+
+
+
+
+%%
+tic
+try
+    % --- Determine the list of page numbers and page titles ALONG WITH the
+    % first survey that started using that specific order of page titles
+    % and numbers for Enrollment, Long Surveys, and Short Surveys ---
+    % SURVEYPAGEHEADER = sprintf('%s_pg%d', {'Enrollment', 'monthly_YYYY03MM', 'followup_%'}, pageNum (EXCEPT ONE PAGE IS 'pgDrug', 'followup_pg8' NOT 'followup_6_mo_pg8'))
+    % SURVEYSELECT = {'ph.Name LIKE ''%Enrollment%''', 'ph.DatabasePrefix = ''monthly_YYYY03MM''', 'ph.DatabasePrefix = ''followup_20250107''' OR 'ph.DatabasePrefix = ''followup_6_mo'''} 
+    % SURVEYDESCRIPTION = {'Psoriasis Registry - Enrollment PhaseId', 'Psoriasis Monthly Survey for MMM YYYY', 'Psoriasis Followup Survey for version "20250107" or "6_mo"'}
+    surveyList = {'Enrollment', 'Long', 'Short'};
+    for currentSurvey = surveyList
+        switch string(currentSurvey)
+            case 'Enrollment'
+                surveyName = 'Enroll';
+                surveySelect = 'ph.Name LIKE ''%Enrollment%''';
+                surveyDescription = 'Dupuytrens Enrollment PhaseId';
+                surveyPageHeader = [sprintf('%s_pg', 'EnrollDup'), '%d'];
+            case 'Long'
+                surveyName = 'Dup';
+                % surveySelect = 'ph.DatabasePrefix = ''Dup%d''';
+                % surveyDescription = 'Dupuytrens Long Survey for ph%d';
+                % surveyPageHeader = [sprintf('%s_pg', 'Dup%d'), '%d'];
+                surveySelect = 'ph.DatabasePrefix = ''Dup%s''';
+                surveyDescription = 'Dupuytrens Long Survey for ph%s';
+                surveyPageHeader = [sprintf('%s_pg', 'Dup%s'), '%d'];
+            case 'Short'
+                surveyName = 'Short';
+                % surveySelect = 'ph.DatabasePrefix = ''Short%d''';
+                % surveyDescription = 'Dupuytrens Short Survey for ph%d';
+                % surveyPageHeader = [sprintf('%s_pg', 'Short%d'), '%d'];
+                surveySelect = 'ph.DatabasePrefix = ''Short%s''';
+                surveyDescription = 'Dupuytrens Short Survey for ph%s';
+                surveyPageHeader = [sprintf('%s_pg', 'Short%s'), '%d'];
+        end
+        
+        % initialize queryList structs
+        [queryList.pageHeaders.(string(currentSurvey)), ...
+           queryList.availablePhases.(string(currentSurvey)), ...
+           queryList.availableTables.(string(currentSurvey)), ...
+           queryList.projectDatabaseInfo.(string(currentSurvey)), ...
+           queryList.questionnairesSent.(string(currentSurvey)), ...
+           queryList.pageStarted.(string(currentSurvey)), ...
+           queryList.pageCompleted.(string(currentSurvey)), ...
+           queryList.pageUnfinished.(string(currentSurvey))] = deal(struct);
+
+        % query pageHeaders
+        queryList.pageHeaders.(string(currentSurvey)) = evalQuery(queryList.pageHeaders.(string(currentSurvey)), ...
+                                                                  sprintf('%s Questionnaire: PageHeaders', string(currentSurvey)), ...
+                                                                  defaultQueryList.pageHeaders.description, ...
+                                                                  strrep(defaultQueryList.pageHeaders.query, '{SURVEYNAME}', surveyName), ...
+                                                                  dbConnection);
+
+        queryList.projectDatabaseInfo.(string(currentSurvey)) = evalQuery(queryList.projectDatabaseInfo.(string(currentSurvey)), ...
+                                                                  sprintf('%s Questionnaire: ProjectDatabaseInfo', string(currentSurvey)), ...
+                                                                  defaultQueryList.projectDatabaseInfo.description, ...
+                                                                  strrep(defaultQueryList.projectDatabaseInfo.query, '{PROJECTNAME}', 'Dupuytrens'), ...
+                                                                  dbConnection);
+
+        % - Determine the list of pages that can be queried for each survey -
+        % for each database prefix, the initial order of page headers is
+        % screwy (e.g., [1], [10], [11], ..., [19], [2], [20], ...). Fix
+        % this. -
+
+        % create another column in ~.data that is a two-digit representation 
+        % of the page number. The rows of ~.data will be sorted by this 
+        % two-digit number
+        queryList.pageHeaders.(string(currentSurvey)).data.FormattedPageNum = extractBetween(queryList.pageHeaders.(string(currentSurvey)).data.PageHeader, '[', ']');
+        queryList.pageHeaders.(string(currentSurvey)).data.FormattedPageNum(matches(queryList.pageHeaders.(string(currentSurvey)).data.FormattedPageNum, digitsPattern(1))) = cellstr([repmat(['0'], sum(matches(queryList.pageHeaders.(string(currentSurvey)).data.FormattedPageNum, digitsPattern(1))), 1), [queryList.pageHeaders.(string(currentSurvey)).data.FormattedPageNum{matches(queryList.pageHeaders.(string(currentSurvey)).data.FormattedPageNum, digitsPattern(1))}]']);
+        queryList.pageHeaders.(string(currentSurvey)).data = sortrows(queryList.pageHeaders.(string(currentSurvey)).data, {'DatabasePrefix', 'FormattedPageNum'});
+        
+        % create a list of database prefix numbers AND a list page headers 
+        % for each database prefix
+        databasePrefixNumList.(string(currentSurvey)) = [];
+        databasePrefixList.(string(currentSurvey)) = {};
+        % for databasePrefixName = unique(queryList.pageHeaders.(string(currentSurvey)).data.DatabasePrefix)'
+        for databasePrefixName = unique(queryList.pageHeaders.(string(currentSurvey)).data.DatabasePrefix)'
+            databasePrefixNumList.(string(currentSurvey)) = [databasePrefixNumList.(string(currentSurvey)), str2double(extract(databasePrefixName, digitsPattern))];
+            % databasePrefixList.(string(currentSurvey)) = [databasePrefixList.(string(currentSurvey)), extractAfter(databasePrefixName, [surveyName, '_'])];
+            databasePrefixList.(string(currentSurvey)) = [databasePrefixList.(string(currentSurvey)), extractAfter(databasePrefixName, surveyName)];
+            pageHeaders.(string(currentSurvey)).(string(databasePrefixName)) = queryList.pageHeaders.(string(currentSurvey)).data.PageHeader(matches(queryList.pageHeaders.(string(currentSurvey)).data.DatabasePrefix, databasePrefixName));
+        end
+        
+        if ~strcmp(currentSurvey, 'Enrollment')
+            % - Determine the list of available phases and corresponding Natalog phase ids for the current survey -
+            queryList.availablePhases.(string(currentSurvey)) = evalQuery(queryList.availablePhases.(string(currentSurvey)), ...
+                                                                          sprintf('%s Questionnaire: Available Phases', string(currentSurvey)), ...
+                                                                          defaultQueryList.availablePhases.description, ...
+                                                                          strrep(defaultQueryList.availablePhases.query, '{SURVEYNAME}', surveyName), ...
+                                                                          dbConnection);
+
+            % replace empty questids with 'NULL'
+            queryList.availablePhases.(string(currentSurvey)).data.questid(cellfun(@isempty, queryList.availablePhases.(string(currentSurvey)).data.questid)) = deal({'NULL'});
+            
+            % sort the pageHeaders by date (really it's just alphabetically)
+            [pageHeaders.(string(currentSurvey)), sortIndex] = orderfields(pageHeaders.(string(currentSurvey)));
+
+
+            % retreive list of available table names (e.g., Dup86_pg7, etc)
+            queryList.availableTables.(string(currentSurvey)) = evalQuery(queryList.availableTables.(string(currentSurvey)), ...
+                                                                          sprintf('%s Questionnaire: Available Tables', string(currentSurvey)), ...
+                                                                          defaultQueryList.availableTables.description, ...
+                                                                          strrep(defaultQueryList.availableTables.query, '{SURVEYNAME}', surveyName), ...
+                                                                          dbConnection);
+            
+            for phaseName = databasePrefixList.(string(currentSurvey)) % for each survey phase name...
+                % define current survey description
+                currentSurveyDescription = sprintf(surveyDescription, string(phaseName));
+
+                % identify the Natalog Phase ID that corresponds to the
+                % current survey phase
+                currentNatalogPhaseID = queryList.availablePhases.(string(currentSurvey)).data.NatalogField{matches(queryList.availablePhases.(string(currentSurvey)).data.DatabasePrefix, sprintf('%s%s', surveyName, string(phaseName)))};
+                
+                % - Total questionnaires sent -
+                queryList.questionnairesSent.(string(currentSurvey)) = evalQuery(queryList.questionnairesSent.(string(currentSurvey)), ...
+                                                                                 sprintf('%s Questionnaire: Sent Surveys', string(currentSurvey)), ...
+                                                                                 defaultQueryList.questionnairesSent.description, ...
+                                                                                 sprintf(strrep(strrep(defaultQueryList.questionnairesSent.query, '{SURVEYSELECT}', surveySelect), '{SURVEYDESCRIPTION}', currentSurveyDescription), string(phaseName)), ...
+                                                                                 dbConnection, ...
+                                                                                 sprintf('%s%s', surveyName, string(phaseName)));
+
+
+                for pageNum = str2double(extractBetween(pageHeaders.(string(currentSurvey)).(sprintf('%s%s', surveyName, string(phaseName))), '[', ']'))'
+                    currentSurveyPageHeader = sprintf(surveyPageHeader, string(phaseName), pageNum);
+
+                    % - Total patients who completed, started, or didn't finish the current page -
+                    if ~any(matches(queryList.availableTables.(string(currentSurvey)).data.TABLE_NAME, sprintf('%s%s_pg%d', surveyName, string(phaseName), pageNum))) % if current table name can't be found in Psoriasis tables, then the current page must be pgDrug
+
+                        queryList.pageStarted.(string(currentSurvey)) = evalQuery(queryList.pageStarted.(string(currentSurvey)), ...
+                                                                                  sprintf('%s Questionnaire: Started Surveys', string(currentSurvey)), ...
+                                                                                  defaultQueryList.pageStarted.description, ...
+                                                                                  sprintf(strrep(strrep(strrep(strrep(strrep(defaultQueryList.pageStarted.query, '{NATALOGPHASEID}', currentNatalogPhaseID), '{SURVEYPAGEHEADER}', surveyPageHeader), '{SURVEYSELECT}', surveySelect), '{SURVEYDESCRIPTION}', currentSurveyDescription), 'pg%d', 'pgDrug'), string(phaseName), string(phaseName), string(phaseName)), ...
+                                                                                  dbConnection, ...
+                                                                                  sprintf('%s%s', surveyName, string(phaseName)), ...
+                                                                                  sprintf('pg%d', pageNum));
+                        queryList.pageCompleted.(string(currentSurvey)) = evalQuery(queryList.pageCompleted.(string(currentSurvey)), ...
+                                                                                    sprintf('%s Questionnaire: Completed Surveys', string(currentSurvey)), ...
+                                                                                    defaultQueryList.pageCompleted.description, ...
+                                                                                    sprintf(strrep(strrep(strrep(strrep(strrep(defaultQueryList.pageCompleted.query, '{NATALOGPHASEID}', currentNatalogPhaseID), '{SURVEYPAGEHEADER}', surveyPageHeader), '{SURVEYSELECT}', surveySelect), '{SURVEYDESCRIPTION}', currentSurveyDescription), 'pg%d', 'pgDrug'), string(phaseName), string(phaseName), string(phaseName)), ...
+                                                                                    dbConnection, ...
+                                                                                    sprintf('%s%s', surveyName, string(phaseName)), ...
+                                                                                    sprintf('pg%d', pageNum));
+                        queryList.pageUnfinished.(string(currentSurvey)) = evalQuery(queryList.pageUnfinished.(string(currentSurvey)), ...
+                                                                                     sprintf('%s Questionnaire: Unfinished Surveys', string(currentSurvey)), ...
+                                                                                     defaultQueryList.pageUnfinished.description, ...
+                                                                                     sprintf(strrep(strrep(strrep(strrep(strrep(defaultQueryList.pageUnfinished.query, '{NATALOGPHASEID}', currentNatalogPhaseID), '{SURVEYPAGEHEADER}', surveyPageHeader), '{SURVEYSELECT}', surveySelect), '{SURVEYDESCRIPTION}', currentSurveyDescription), 'pg%d', 'pgDrug'), string(phaseName), string(phaseName), string(phaseName)), ...
+                                                                                     dbConnection, ...
+                                                                                     sprintf('%s%s', surveyName, string(phaseName)), ...
+                                                                                     sprintf('pg%d', pageNum));
+
+                    else
+                        queryList.pageStarted.(string(currentSurvey)) = evalQuery(queryList.pageStarted.(string(currentSurvey)), ...
+                                                                                  sprintf('%s Questionnaire: Started Surveys', string(currentSurvey)), ...
+                                                                                  defaultQueryList.pageStarted.description, ...
+                                                                                  sprintf(strrep(strrep(strrep(strrep(defaultQueryList.pageStarted.query, '{NATALOGPHASEID}', currentNatalogPhaseID), '{SURVEYPAGEHEADER}', surveyPageHeader), '{SURVEYSELECT}', surveySelect), '{SURVEYDESCRIPTION}', currentSurveyDescription), string(phaseName), pageNum, string(phaseName), pageNum, string(phaseName)), ...
+                                                                                  dbConnection, ...
+                                                                                  sprintf('%s%s', surveyName, string(phaseName)), ...
+                                                                                  sprintf('pg%d', pageNum));
+                        queryList.pageCompleted.(string(currentSurvey)) = evalQuery(queryList.pageCompleted.(string(currentSurvey)), ...
+                                                                                    sprintf('%s Questionnaire: Completed Surveys', string(currentSurvey)), ...
+                                                                                    defaultQueryList.pageCompleted.description, ...
+                                                                                    sprintf(strrep(strrep(strrep(strrep(defaultQueryList.pageCompleted.query, '{NATALOGPHASEID}', currentNatalogPhaseID), '{SURVEYPAGEHEADER}', surveyPageHeader), '{SURVEYSELECT}', surveySelect), '{SURVEYDESCRIPTION}', currentSurveyDescription), string(phaseName), pageNum, string(phaseName), pageNum, string(phaseName)), ...
+                                                                                    dbConnection, ...
+                                                                                    sprintf('%s%s', surveyName, string(phaseName)), ...
+                                                                                    sprintf('pg%d', pageNum));
+                        queryList.pageUnfinished.(string(currentSurvey)) = evalQuery(queryList.pageUnfinished.(string(currentSurvey)), ...
+                                                                                     sprintf('%s Questionnaire: pageUnfinished Surveys', string(currentSurvey)), ...
+                                                                                     defaultQueryList.pageUnfinished.description, ...
+                                                                                     sprintf(strrep(strrep(strrep(strrep(defaultQueryList.pageUnfinished.query, '{NATALOGPHASEID}', currentNatalogPhaseID), '{SURVEYPAGEHEADER}', surveyPageHeader), '{SURVEYSELECT}', surveySelect), '{SURVEYDESCRIPTION}', currentSurveyDescription), string(phaseName), pageNum, string(phaseName), pageNum, string(phaseName)), ...
+                                                                                     dbConnection, ...
+                                                                                     sprintf('%s%s', surveyName, string(phaseName)), ...
+                                                                                     sprintf('pg%d', pageNum));
+                    end
+                    % % pageUnfinished = pageStarted - pageCompleted
+                    % queryList.pageUnfinished.(string(currentSurvey)).title = sprintf('%s Questionnaire: Unfinished Surveys', string(currentSurvey));
+                    % queryList.pageUnfinished.(string(currentSurvey)).description = 'Participants who started, but didn''t complete the page';
+                    % % queryList.pageUnfinished.(string(currentSurvey)).data.(sprintf('%s%s', surveyName, string(phaseName))).(sprintf('pg%d', pageNum)) = array2table(table2array(queryList.pageStarted.(string(currentSurvey)).data.(sprintf('%s%s', surveyName, string(phaseName))).(sprintf('pg%d', pageNum))), 'VariableNames',{'NumParticipantsThatNoFinishPage'});
+                    % % queryList.pageUnfinished.(string(currentSurvey)).data.(sprintf('%s%s', surveyName, string(phaseName))).(sprintf('pg%d', pageNum)) = array2table(table2array(queryList.pageStarted.(string(currentSurvey)).data.(sprintf('%s%s', surveyName, string(phaseName))).(sprintf('pg%d', pageNum))), 'VariableNames',queryList.pageStarted.(string(currentSurvey)).data.(sprintf('%s%s', surveyName, string(phaseName))).(sprintf('pg%d', pageNum)).Properties.VariableNames);
+                    % queryList.pageUnfinished.(string(currentSurvey)).data.(sprintf('%s%s', surveyName, string(phaseName))).(sprintf('pg%d', pageNum)) = queryList.pageStarted.(string(currentSurvey)).data.(sprintf('%s%s', surveyName, string(phaseName))).(sprintf('pg%d', pageNum))(~matches(queryList.pageStarted.(string(currentSurvey)).data.(sprintf('%s%s', surveyName, string(phaseName))).(sprintf('pg%d', pageNum)).UserID, queryList.pageCompleted.(string(currentSurvey)).data.(sprintf('%s%s', surveyName, string(phaseName))).(sprintf('pg%d', pageNum)).UserID), :); % extract the entries in pageStarted that aren't found in pageCompleted (i.e., unfinished pages)               
+
+                    fprintf('%s Survey, Phase %s, Page %d completed...\n', string(currentSurvey), string(phaseName), pageNum);
+                end
+            end
+        else
+            % - Determine the list of available phases and corresponding Natalog phase ids for the current survey -
+            queryList.availablePhases.(string(currentSurvey)) = evalQuery(queryList.availablePhases.(string(currentSurvey)), ...
+                                                                          sprintf('%s Questionnaire: Available Phases', string(currentSurvey)), ...
+                                                                          defaultQueryList.availablePhases.description, ...
+                                                                          strrep(defaultQueryList.availablePhases.query, '{SURVEYNAME}', surveyName), ...
+                                                                          dbConnection);
+
+            % replace empty questids with 'NULL'
+            queryList.availablePhases.(string(currentSurvey)).data.questid(cellfun(@isempty, queryList.availablePhases.(string(currentSurvey)).data.questid)) = deal({'NULL'});
+
+            % - Total questionnaires sent -
+            queryList.questionnairesSent.(string(currentSurvey)) = evalQuery(queryList.questionnairesSent.(string(currentSurvey)), ...
+                                                                             sprintf('%s Questionnaire: Sent Surveys', string(currentSurvey)), ...
+                                                                             defaultQueryList.questionnairesSent.description, ...
+                                                                             strrep(strrep(defaultQueryList.questionnairesSent.query, '{SURVEYSELECT}', surveySelect), '{SURVEYDESCRIPTION}', surveyDescription), ...
+                                                                             dbConnection, ...
+                                                                             extractBefore(surveyPageHeader, '_'));
+
+            % retreive list of available table names (e.g., PSOR86_pg7, etc)
+            queryList.availableTables.(string(currentSurvey)) = evalQuery(queryList.availableTables.(string(currentSurvey)), ...
+                                                                          sprintf('%s Questionnaire: Available Tables', string(currentSurvey)), ...
+                                                                          defaultQueryList.availableTables.description, ...
+                                                                          strrep(defaultQueryList.availableTables.query, '{SURVEYNAME}', surveyName), ...
+                                                                          dbConnection);
+
+            % identify the Natalog Phase ID that corresponds to the
+            % current survey phase
+            currentNatalogPhaseID = queryList.availablePhases.(string(currentSurvey)).data.NatalogField{matches(queryList.availablePhases.(string(currentSurvey)).data.DatabasePrefix, databasePrefixName)};
+            
+            for pageNum = str2double(extractBetween(pageHeaders.(string(currentSurvey)).(extractBefore(surveyPageHeader, '_')), '[', ']'))'
+                % - Total patients who completed, started, or didn't finish the current page -
+                if ~any(matches(queryList.availableTables.(string(currentSurvey)).data.TABLE_NAME, sprintf('%s_pg%d', extractBefore(surveyPageHeader, '_'), pageNum))) % if current table name can't be found in Psoriasis tables, then the current page must be pgDrug
+                    queryList.pageStarted.(string(currentSurvey)) = evalQuery(queryList.pageStarted.(string(currentSurvey)), ...
+                                                                              sprintf('%s Questionnaire: Started Surveys', string(currentSurvey)), ...
+                                                                              defaultQueryList.pageStarted.description, ...
+                                                                              strrep(strrep(strrep(strrep(strrep(defaultQueryList.pageStarted.query, '{NATALOGPHASEID}', currentNatalogPhaseID), '{SURVEYPAGEHEADER}', surveyPageHeader), '{SURVEYSELECT}', surveySelect), '{SURVEYDESCRIPTION}', surveyDescription), 'pg%d', 'pgDrug'), ...
+                                                                              dbConnection, ...
+                                                                              extractBefore(surveyPageHeader, '_'), ...
+                                                                              sprintf('pg%d', pageNum));
+                    queryList.pageCompleted.(string(currentSurvey)) = evalQuery(queryList.pageCompleted.(string(currentSurvey)), ...
+                                                                                sprintf('%s Questionnaire: Completed Surveys', string(currentSurvey)), ...
+                                                                                defaultQueryList.pageCompleted.description, ...
+                                                                                strrep(strrep(strrep(strrep(strrep(defaultQueryList.pageCompleted.query, '{NATALOGPHASEID}', currentNatalogPhaseID), '{SURVEYPAGEHEADER}', surveyPageHeader), '{SURVEYSELECT}', surveySelect), '{SURVEYDESCRIPTION}', surveyDescription), 'pg%d', 'pgDrug'), ...
+                                                                                dbConnection, ...
+                                                                                extractBefore(surveyPageHeader, '_'), ...
+                                                                                sprintf('pg%d', pageNum));
+                    queryList.pageUnfinished.(string(currentSurvey)) = evalQuery(queryList.pageUnfinished.(string(currentSurvey)), ...
+                                                                                 sprintf('%s Questionnaire: pageUnfinished Surveys', string(currentSurvey)), ...
+                                                                                 defaultQueryList.pageUnfinished.description, ...
+                                                                                 strrep(strrep(strrep(strrep(strrep(defaultQueryList.pageUnfinished.query, '{NATALOGPHASEID}', currentNatalogPhaseID), '{SURVEYPAGEHEADER}', surveyPageHeader), '{SURVEYSELECT}', surveySelect), '{SURVEYDESCRIPTION}', surveyDescription), 'pg%d', 'pgDrug'), ...
+                                                                                 dbConnection, ...
+                                                                                 extractBefore(surveyPageHeader, '_'), ...
+                                                                                 sprintf('pg%d', pageNum));
+                else
+                    queryList.pageStarted.(string(currentSurvey)) = evalQuery(queryList.pageStarted.(string(currentSurvey)), ...
+                                                                              sprintf('%s Questionnaire: Started Surveys', string(currentSurvey)), ...
+                                                                              defaultQueryList.pageStarted.description, ...
+                                                                              sprintf(strrep(strrep(strrep(strrep(defaultQueryList.pageStarted.query, '{NATALOGPHASEID}', currentNatalogPhaseID), '{SURVEYPAGEHEADER}', surveyPageHeader), '{SURVEYSELECT}', strrep(surveySelect, '%', '%%')), '{SURVEYDESCRIPTION}', surveyDescription), pageNum, pageNum), ...
+                                                                              dbConnection, ...
+                                                                              extractBefore(surveyPageHeader, '_'), ...
+                                                                              sprintf('pg%d', pageNum));
+                    queryList.pageCompleted.(string(currentSurvey)) = evalQuery(queryList.pageCompleted.(string(currentSurvey)), ...
+                                                                                sprintf('%s Questionnaire: Completed Surveys', string(currentSurvey)), ...
+                                                                                defaultQueryList.pageCompleted.description, ...
+                                                                                sprintf(strrep(strrep(strrep(strrep(defaultQueryList.pageCompleted.query, '{NATALOGPHASEID}', currentNatalogPhaseID), '{SURVEYPAGEHEADER}', surveyPageHeader), '{SURVEYSELECT}', strrep(surveySelect, '%', '%%')), '{SURVEYDESCRIPTION}', surveyDescription), pageNum, pageNum), ...
+                                                                                dbConnection, ...
+                                                                                extractBefore(surveyPageHeader, '_'), ...
+                                                                                sprintf('pg%d', pageNum));
+                    queryList.pageUnfinished.(string(currentSurvey)) = evalQuery(queryList.pageUnfinished.(string(currentSurvey)), ...
+                                                                                 sprintf('%s Questionnaire: pageUnfinished Surveys', string(currentSurvey)), ...
+                                                                                 defaultQueryList.pageUnfinished.description, ...
+                                                                                 sprintf(strrep(strrep(strrep(strrep(defaultQueryList.pageUnfinished.query, '{NATALOGPHASEID}', currentNatalogPhaseID), '{SURVEYPAGEHEADER}', surveyPageHeader), '{SURVEYSELECT}', strrep(surveySelect, '%', '%%')), '{SURVEYDESCRIPTION}', surveyDescription), pageNum, pageNum), ...
+                                                                                 dbConnection, ...
+                                                                                 extractBefore(surveyPageHeader, '_'), ...
+                                                                                 sprintf('pg%d', pageNum));
+                end
+                % % pageUnfinished = pageStarted - pageCompleted
+                % queryList.pageUnfinished.(string(currentSurvey)).title = sprintf('%s Questionnaire: Unfinished Surveys', string(currentSurvey));
+                % queryList.pageUnfinished.(string(currentSurvey)).description = 'Participants who started, but didn''t complete the page';
+                % % queryList.pageUnfinished.(string(currentSurvey)).data.(string(extractBefore(surveyPageHeader, '_'))).(sprintf('pg%d', pageNum)) = array2table(table2array(queryList.pageStarted.(string(currentSurvey)).data.(string(extractBefore(surveyPageHeader, '_'))).(sprintf('pg%d', pageNum))), 'VariableNames',{'NumParticipantsThatNoFinishPage'});
+                % % queryList.pageUnfinished.(string(currentSurvey)).data.(string(extractBefore(surveyPageHeader, '_'))).(sprintf('pg%d', pageNum)) = array2table(table2array(queryList.pageStarted.(string(currentSurvey)).data.(string(extractBefore(surveyPageHeader, '_'))).(sprintf('pg%d', pageNum))), 'VariableNames',queryList.pageStarted.(string(currentSurvey)).data.(string(extractBefore(surveyPageHeader, '_'))).(sprintf('pg%d', pageNum)).Properties.VariableNames);
+                % queryList.pageUnfinished.(string(currentSurvey)).data.(string(extractBefore(surveyPageHeader, '_'))).(sprintf('pg%d', pageNum)) = queryList.pageStarted.(string(currentSurvey)).data.(string(extractBefore(surveyPageHeader, '_'))).(sprintf('pg%d', pageNum))(~matches(queryList.pageStarted.(string(currentSurvey)).data.(string(extractBefore(surveyPageHeader, '_'))).(sprintf('pg%d', pageNum)).UserID, queryList.pageCompleted.(string(currentSurvey)).data.(string(extractBefore(surveyPageHeader, '_'))).(sprintf('pg%d', pageNum)).UserID), :); % extract the entries in pageStarted that aren't found in pageCompleted (i.e., unfinished pages)
+
+                fprintf('%s Survey, Page %d completed...\n', string(currentSurvey), pageNum);
+            end
+        end
+
+    end
+
+catch ME
+    close(dbConnection);
+    rethrow(ME);
+end
+queryListFieldNames = fieldnames(queryList);
+toc
+
+% save current queryList (in case you want the original queryList without
+% rerunning all the queries)
+queryListRaw = queryList;
+
+% --- Replace each postal code (if a US Zip Code) with the state abbreviation ---
+% load zip code key
+warning off
+zipRawTable = readtable('ZIP_Locale_Detail.xls');
+warning on
+% % find list of unique 3-digit zips and their corresponding states
+uniqueStateList = [unique(zipRawTable.PHYSICALSTATE); {'International'}];
+%%
+% replace postal codes
+tic
+fprintf('Replacing postal codes with state abbreviations...\n')
+for currentSurvey = surveyList
+    for tableType = {'questionnairesSent', 'pageStarted', 'pageCompleted', 'pageUnfinished'}
+        for currentPhaseName = fieldnames(queryList.(string(tableType)).(string(currentSurvey)).data)'
+            switch string(tableType)
+                case 'questionnairesSent'
+                    % replace USA postal codes with the corresponding state
+                    % abbreviation
+                    queryList.(string(tableType)).(string(currentSurvey)).data.(string(currentPhaseName)).PostalCode = replace(queryList.(string(tableType)).(string(currentSurvey)).data.(string(currentPhaseName)).PostalCode, zipRawTable.DELIVERYZIPCODE, zipRawTable.PHYSICALSTATE);
+                    % replace postal codes that weren't found to be US states
+                    % with 'International'
+                    queryList.(string(tableType)).(string(currentSurvey)).data.(string(currentPhaseName)).PostalCode(~matches(queryList.(string(tableType)).(string(currentSurvey)).data.(string(currentPhaseName)).PostalCode, lettersPattern(2))) = {'International'};
+                otherwise
+                    for pageName = fieldnames(queryList.(string(tableType)).(string(currentSurvey)).data.(string(currentPhaseName)))'
+                        % replace USA postal codes with the corresponding state
+                        % abbreviation
+                        queryList.(string(tableType)).(string(currentSurvey)).data.(string(currentPhaseName)).(string(pageName)).PostalCode = replace(queryList.(string(tableType)).(string(currentSurvey)).data.(string(currentPhaseName)).(string(pageName)).PostalCode, zipRawTable.DELIVERYZIPCODE, zipRawTable.PHYSICALSTATE);
+                        % replace postal codes that weren't found to be US states
+                        % with 'International'
+                        queryList.(string(tableType)).(string(currentSurvey)).data.(string(currentPhaseName)).(string(pageName)).PostalCode(~matches(queryList.(string(tableType)).(string(currentSurvey)).data.(string(currentPhaseName)).(string(pageName)).PostalCode, lettersPattern(2))) = {'International'};
+                    end
+            end
+        end
+    end
+end
+toc
+
+%%
+% --- Arrange the data into a neat table ---
+tic
+fprintf('Arranging data into a neat table...\n')
+
+tableTypeList = {'percentPageCompleted', 'pageCompleted', 'percentPageStarted', 'pageStarted', 'percentPageUnfinished', 'pageUnfinished'};
+variationTypeList = {'Standard','Weekday','PostalState'};
+weekdayList = {'Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'};
+for currentSurvey = surveyList
+    % each pageHeader will have its own table (cus each pageHeader has
+    % different pages). determine which phases go with which
+    % pageHeaders
+    % determine the unique pageHeader sets
+    uniqueHeadersCount = 1;
+    phaseList.(string(currentSurvey)) = flipud(fieldnames(pageHeaders.(string(currentSurvey))))'; % NOTE: the order of the fieldnames has been reversed to (hopefully) facilitate the formatting onto the spreadsheet at the end (e.g., where the most recent surveys start at the top of the spreadsheet)
+    pageHeadersUnique.(string(currentSurvey)).headers{uniqueHeadersCount} = pageHeaders.(string(currentSurvey)).(string(phaseList.(string(currentSurvey))(1))); % initialize the first set of unique pageHeaders as the set that belongs to the first phase
+    pageHeadersUnique.(string(currentSurvey)).phases{uniqueHeadersCount} = phaseList.(string(currentSurvey))(1); % initialize the first phase of the first set of unique pageHeaders as the first phase
+    for phaseListNum = 2:length(phaseList.(string(currentSurvey)))
+        % if the headers match between the current set unique
+        % pageHeaders and the pageHeaders for the current phase AND the
+        % current set of unique pageHeaders and the pageHeaders for the
+        % current phase have the same number of elements...
+        if all(matches(pageHeadersUnique.(string(currentSurvey)).headers{uniqueHeadersCount}, pageHeaders.(string(currentSurvey)).(string(phaseList.(string(currentSurvey))(phaseListNum))))) && (numel(pageHeadersUnique.(string(currentSurvey)).headers{uniqueHeadersCount}) == numel(pageHeaders.(string(currentSurvey)).(string(phaseList.(string(currentSurvey))(phaseListNum)))))
+            % add the current phase to the list of phases that share
+            % the current set of unique pageHeaders
+            pageHeadersUnique.(string(currentSurvey)).phases{uniqueHeadersCount} = [pageHeadersUnique.(string(currentSurvey)).phases{uniqueHeadersCount}, phaseList.(string(currentSurvey))(phaseListNum)];
+        else % if the current set of unique pageHeaders and the pageHeaders for the current phase are different...
+            uniqueHeadersCount = uniqueHeadersCount + 1;
+            pageHeadersUnique.(string(currentSurvey)).headers{uniqueHeadersCount} = pageHeaders.(string(currentSurvey)).(string(phaseList.(string(currentSurvey))(phaseListNum))); % define the next set of unique pageHeaders as the set that belongs to the current phase
+            pageHeadersUnique.(string(currentSurvey)).phases{uniqueHeadersCount} = phaseList.(string(currentSurvey))(phaseListNum); % initialize the first phase of the next set of unique pageHeaders as the current phase
+        end
+    end
+
+    for pageHeaderUniqueNum = 1:length(pageHeadersUnique.(string(currentSurvey)).headers)
+        % - Initialize outputDataTablesCell tables for current pageHeader -
+        for tableType = {'pageStarted', 'pageCompleted', 'pageUnfinished', 'percentPageStarted', 'percentPageCompleted', 'percentPageUnfinished'}
+            for variationType = variationTypeList
+                % initialize outputDataTablesCell tables for current pageHeader
+                 switch string(variationType)
+                    case 'Standard'
+                        outputDataTablesCell.(string(tableType)).(string(currentSurvey)){pageHeaderUniqueNum} = cell(length(pageHeadersUnique.(string(currentSurvey)).phases{pageHeaderUniqueNum}) + 1, height(pageHeadersUnique.(string(currentSurvey)).headers{pageHeaderUniqueNum}) + 1);
+                        outputDataTablesCell.(string(tableType)).(string(currentSurvey)){pageHeaderUniqueNum}(2:end, 1) = pageHeadersUnique.(string(currentSurvey)).phases{pageHeaderUniqueNum}';
+                        outputDataTablesCell.(string(tableType)).(string(currentSurvey)){pageHeaderUniqueNum}(1, 2:end) = pageHeadersUnique.(string(currentSurvey)).headers{pageHeaderUniqueNum}';
+                    case 'Weekday'
+                        outputDataTablesCell.(sprintf('%s%s', string(tableType), string(variationType))).(string(currentSurvey)){pageHeaderUniqueNum} = cell((length(weekdayList) * length(pageHeadersUnique.(string(currentSurvey)).phases{pageHeaderUniqueNum})) + 1, height(pageHeadersUnique.(string(currentSurvey)).headers{pageHeaderUniqueNum}) + 1);
+                        outputDataTablesCell.(sprintf('%s%s', string(tableType), string(variationType))).(string(currentSurvey)){pageHeaderUniqueNum}(2:end, 1) = reshape(repmat(pageHeadersUnique.(string(currentSurvey)).phases{pageHeaderUniqueNum}, length(weekdayList), 1), [], 1);
+                        outputDataTablesCell.(sprintf('%s%s', string(tableType), string(variationType))).(string(currentSurvey)){pageHeaderUniqueNum}(1, 2:end) = pageHeadersUnique.(string(currentSurvey)).headers{pageHeaderUniqueNum}';
+                    case 'PostalState'
+                        outputDataTablesCell.(sprintf('%s%s', string(tableType), string(variationType))).(string(currentSurvey)){pageHeaderUniqueNum} = cell((length(uniqueStateList) * length(pageHeadersUnique.(string(currentSurvey)).phases{pageHeaderUniqueNum})) + 1, height(pageHeadersUnique.(string(currentSurvey)).headers{pageHeaderUniqueNum}) + 1);
+                        outputDataTablesCell.(sprintf('%s%s', string(tableType), string(variationType))).(string(currentSurvey)){pageHeaderUniqueNum}(2:end, 1) = reshape(repmat(pageHeadersUnique.(string(currentSurvey)).phases{pageHeaderUniqueNum}, length(uniqueStateList), 1), [], 1);
+                        outputDataTablesCell.(sprintf('%s%s', string(tableType), string(variationType))).(string(currentSurvey)){pageHeaderUniqueNum}(1, 2:end) = pageHeadersUnique.(string(currentSurvey)).headers{pageHeaderUniqueNum}';
+                end
+                
+                % insert data for each page for the current pageHeader
+                switch string(variationType)
+                    case 'Standard'
+                        currentPhaseNameList = unique(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){pageHeaderUniqueNum}(2:end, 1)', 'stable');
+                    otherwise
+                        currentPhaseNameList = unique(extractBefore(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){pageHeaderUniqueNum}(2:end, 1)', '/'), 'stable');
+                end
+                pageNumList = str2double(extractBetween(pageHeadersUnique.(string(currentSurvey)).headers{pageHeaderUniqueNum}, '[', ']'))'; % assume all tables have the same page numbers as pageStarted
+                for currentPhaseNameIndex = 1:length(currentPhaseNameList)
+                    for pageNumIndex = 1:length(pageNumList)
+                        warning off
+                        if contains(tableType, 'percent')
+                            switch string(variationType)
+                                case 'Standard'
+                                    % - total percents of pages -
+                                    switch string(tableType)
+                                        case 'percentPageStarted' % should be percent of {surveys started}/{total surveys sent}
+                                            outputDataTablesCell.(string(tableType)).(string(currentSurvey)){pageHeaderUniqueNum}{currentPhaseNameIndex + 1, pageNumIndex + 1} = round(10000 * (height(queryList.(strrep(string(tableType), 'ercentP', '')).(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex))).(sprintf('pg%d', pageNumList(pageNumIndex)))) / height(queryList.questionnairesSent.(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex)))))) / 100;
+                                        otherwise % should be a percent of {surveys either completed or unfinished}/{total surveys started}
+                                            outputDataTablesCell.(string(tableType)).(string(currentSurvey)){pageHeaderUniqueNum}{currentPhaseNameIndex + 1, pageNumIndex + 1} = round(10000 * (height(queryList.(strrep(string(tableType), 'ercentP', '')).(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex))).(sprintf('pg%d', pageNumList(pageNumIndex)))) / height(queryList.pageStarted.(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex))).(sprintf('pg%d', pageNumList(pageNumIndex)))))) / 100;
+                                    end
+                                case 'Weekday'
+                                    % - weekdays -
+                                    % assign the list of weekday names to the first column
+                                    outputDataTablesCell.(sprintf('%s%s', string(tableType), string(variationType))).(string(currentSurvey)){pageHeaderUniqueNum}(length(weekdayList)*(currentPhaseNameIndex-1) + 1 + [1:length(weekdayList)], 1) = weekdayList';
+                                    % evaluate the percent of surveys that 
+                                    % were started, completed, or unfinished 
+                                    % on each weekday relative to the total
+                                    % number of surveys for the week (i.e.,
+                                    % {total surveys with a given status for
+                                    % a weekday}/{sum of total surveys with
+                                    % a given status for the whole week})
+                                    outputDataTablesCell.(sprintf('%s%s', string(tableType), string(variationType))).(string(currentSurvey)){pageHeaderUniqueNum}(length(weekdayList)*(currentPhaseNameIndex-1) + 1 + [1:length(weekdayList)], pageNumIndex + 1) = num2cell(round((10000 * circshift(sum(weekday(extract(queryList.(strrep(string(tableType), 'ercentP', '')).(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex))).(sprintf('pg%d', pageNumList(pageNumIndex))).ActivityDate, digitsPattern(4) + '-' + digitsPattern(2) + '-' + digitsPattern(2))) == [1:length(weekdayList)], 1, 'omitnan')', -1)) / height(queryList.(strrep(string(tableType), 'ercentP', '')).(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex))).(sprintf('pg%d', pageNumList(pageNumIndex))))) / 100);
+                                    % switch string(tableType)
+                                    %     case 'percentPageStarted' % should be percent of {surveys started}/{total surveys sent}
+                                    %         outputDataTablesCell.(sprintf('%s%s', string(tableType), string(variationType))).(string(currentSurvey)){pageHeaderUniqueNum}(length(weekdayList)*(currentPhaseNameIndex-1) + 1 + [1:length(weekdayList)], pageNumIndex + 1) = num2cell(round((10000 * circshift(sum(weekday(extract(queryList.(strrep(string(tableType), 'ercentP', '')).(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex))).(sprintf('pg%d', pageNumList(pageNumIndex))).ActivityDate, digitsPattern(4) + '-' + digitsPattern(2) + '-' + digitsPattern(2))) == [1:length(weekdayList)], 1, 'omitnan')', -1)) / height(queryList.(strrep(string(tableType), 'ercentP', '')).(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex))).(sprintf('pg%d', pageNumList(pageNumIndex))))) / 100);
+                                    %     otherwise % should be a percent of {surveys either completed or unfinished}/{total surveys started}
+                                    %         outputDataTablesCell.(sprintf('%s%s', string(tableType), string(variationType))).(string(currentSurvey)){pageHeaderUniqueNum}(length(weekdayList)*(currentPhaseNameIndex-1) + 1 + [1:length(weekdayList)], pageNumIndex + 1) = num2cell(round((10000 * circshift(sum(weekday(extract(queryList.(strrep(string(tableType), 'ercentP', '')).(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex))).(sprintf('pg%d', pageNumList(pageNumIndex))).ActivityDate, digitsPattern(4) + '-' + digitsPattern(2) + '-' + digitsPattern(2))) == [1:length(weekdayList)], 1, 'omitnan')', -1)) / height(queryList.(strrep(string(tableType), 'ercentP', '')).(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex))).(sprintf('pg%d', pageNumList(pageNumIndex))))) / 100);
+                                    % end
+                                case 'PostalState'
+                                    % - postal codes -
+                                    % assign the list of unique postal code state names to the first column
+                                    outputDataTablesCell.(sprintf('%s%s', string(tableType), string(variationType))).(string(currentSurvey)){pageHeaderUniqueNum}(length(uniqueStateList)*(currentPhaseNameIndex-1) + 1 + [1:length(uniqueStateList)], 1) = uniqueStateList;
+                                    % evaluate the percent counts of postal codes for each page
+                                    switch string(tableType)
+                                        case 'percentPageStarted' % should be percent of {surveys started by a state}/{total surveys sent to that state}
+                                            outputDataTablesCell.(sprintf('%s%s', string(tableType), string(variationType))).(string(currentSurvey)){pageHeaderUniqueNum}(length(uniqueStateList)*(currentPhaseNameIndex-1) + 1 + [1:length(uniqueStateList)], pageNumIndex + 1) = num2cell(round((10000 * sum(string(queryList.(strrep(string(tableType), 'ercentP', '')).(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex))).(sprintf('pg%d', pageNumList(pageNumIndex))).PostalCode) == uniqueStateList', 1, 'omitnan')') ./ sum(string(queryList.questionnairesSent.(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex))).PostalCode) == uniqueStateList', 1, 'omitnan')') / 100);
+                                        otherwise % should be a percent of {surveys either completed or unfinished by a state}/{total surveys started by that state}
+                                            outputDataTablesCell.(sprintf('%s%s', string(tableType), string(variationType))).(string(currentSurvey)){pageHeaderUniqueNum}(length(uniqueStateList)*(currentPhaseNameIndex-1) + 1 + [1:length(uniqueStateList)], pageNumIndex + 1) = num2cell(round((10000 * sum(string(queryList.(strrep(string(tableType), 'ercentP', '')).(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex))).(sprintf('pg%d', pageNumList(pageNumIndex))).PostalCode) == uniqueStateList', 1, 'omitnan')') ./ sum(string(queryList.pageStarted.(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex))).(sprintf('pg%d', pageNumList(pageNumIndex))).PostalCode) == uniqueStateList', 1, 'omitnan')') / 100);
+                                    end
+                            end
+                        else
+                            switch string(variationType)
+                                case 'Standard'
+                                    % - total number of pages -
+                                    outputDataTablesCell.(string(tableType)).(string(currentSurvey)){pageHeaderUniqueNum}(currentPhaseNameIndex + 1, pageNumIndex + 1) = {height(queryList.(string(tableType)).(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex))).(sprintf('pg%d', pageNumList(pageNumIndex))))};
+                                case 'Weekday'
+                                    % - weekdays -
+                                    % assign the list of weekday names to the first column
+                                    outputDataTablesCell.(sprintf('%s%s', string(tableType), string(variationType))).(string(currentSurvey)){pageHeaderUniqueNum}(length(weekdayList)*(currentPhaseNameIndex-1) + 1 + [1:length(weekdayList)], 1) = weekdayList';
+                                    % evaluate the weekday that each page was active 
+                                    outputDataTablesCell.(sprintf('%s%s', string(tableType), string(variationType))).(string(currentSurvey)){pageHeaderUniqueNum}(length(weekdayList)*(currentPhaseNameIndex-1) + 1 + [1:length(weekdayList)], pageNumIndex + 1) = num2cell(circshift(sum(weekday(extract(queryList.(string(tableType)).(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex))).(sprintf('pg%d', pageNumList(pageNumIndex))).ActivityDate, digitsPattern(4) + '-' + digitsPattern(2) + '-' + digitsPattern(2))) == [1:length(weekdayList)], 1, 'omitnan')', -1));
+                                case 'PostalState'
+                                    % - postal codes -
+                                    % assign the list of unique postal code state names to the first column
+                                    outputDataTablesCell.(sprintf('%s%s', string(tableType), string(variationType))).(string(currentSurvey)){pageHeaderUniqueNum}(length(uniqueStateList)*(currentPhaseNameIndex-1) + 1 + [1:length(uniqueStateList)], 1) = uniqueStateList;
+                                    % evaluate the counts of postal codes for each page
+                                    outputDataTablesCell.(sprintf('%s%s', string(tableType), string(variationType))).(string(currentSurvey)){pageHeaderUniqueNum}(length(uniqueStateList)*(currentPhaseNameIndex-1) + 1 + [1:length(uniqueStateList)], pageNumIndex + 1) = num2cell(sum(string(queryList.(string(tableType)).(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex))).(sprintf('pg%d', pageNumList(pageNumIndex))).PostalCode) == uniqueStateList', 1, 'omitnan')');
+                            end
+                        end
+                        warning on
+                    end
+                    
+                    % append number of questionnaires sent as (n=####) to phase 
+                    % name in first column. For tables that have text in the 
+                    % first column, append the existing text to the (n=####) info
+                    currentQuestID = queryList.availablePhases.(string(currentSurvey)).data.questid{matches(queryList.availablePhases.(string(currentSurvey)).data.DatabasePrefix, currentPhaseNameList{currentPhaseNameIndex})};
+                    switch string(variationType)
+                        case 'Standard'
+                            outputDataTablesCell.(string(tableType)).(string(currentSurvey)){pageHeaderUniqueNum}(currentPhaseNameIndex + 1, 1) = {sprintf('%s/%s (n=%d)', currentPhaseNameList{currentPhaseNameIndex}, currentQuestID, height(queryList.questionnairesSent.(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex)))))};
+                        case 'Weekday'
+                            outputDataTablesCell.(sprintf('%s%s', string(tableType), string(variationType))).(string(currentSurvey)){pageHeaderUniqueNum}(length(weekdayList)*(currentPhaseNameIndex-1) + 2 : length(weekdayList)*currentPhaseNameIndex + 1, 1) = join([repmat({sprintf('%s/%s (n=%d)', currentPhaseNameList{currentPhaseNameIndex}, currentQuestID, height(queryList.questionnairesSent.(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex)))))}, length(weekdayList), 1), outputDataTablesCell.(sprintf('%s%s', string(tableType), string(variationType))).(string(currentSurvey)){pageHeaderUniqueNum}(length(weekdayList)*(currentPhaseNameIndex-1) + 2 : length(weekdayList)*currentPhaseNameIndex + 1, 1)], ' - ');
+                        case 'PostalState'
+                            outputDataTablesCell.(sprintf('%s%s', string(tableType), string(variationType))).(string(currentSurvey)){pageHeaderUniqueNum}(length(uniqueStateList)*(currentPhaseNameIndex-1) + 2 : length(uniqueStateList)*currentPhaseNameIndex + 1, 1) = join([repmat({sprintf('%s/%s (n=%d)', currentPhaseNameList{currentPhaseNameIndex}, currentQuestID, height(queryList.questionnairesSent.(string(currentSurvey)).data.(string(currentPhaseNameList(currentPhaseNameIndex)))))}, length(uniqueStateList), 1), outputDataTablesCell.(sprintf('%s%s', string(tableType), string(variationType))).(string(currentSurvey)){pageHeaderUniqueNum}(length(uniqueStateList)*(currentPhaseNameIndex-1) + 2 : length(uniqueStateList)*currentPhaseNameIndex + 1, 1)], ' - ');
+                    end
+                end
+
+                % % replace any NaN values with 0
+                % switch string(variationType)
+                %     case 'Standard'
+                %         outputDataTablesCell.(string(tableType)).(string(currentSurvey)){pageHeaderUniqueNum}(cellfun(@any, cellfun(@isnan, outputDataTablesCell.(string(tableType)).(string(currentSurvey)){pageHeaderUniqueNum}, 'UniformOutput', false))) = {0};
+                %     otherwise
+                %         outputDataTablesCell.(sprintf('%s%s', string(tableType), string(variationType))).(string(currentSurvey)){pageHeaderUniqueNum}(cellfun(@any, cellfun(@isnan, outputDataTablesCell.(sprintf('%s%s', string(tableType), string(variationType))).(string(currentSurvey)){pageHeaderUniqueNum}, 'UniformOutput', false))) = {0};
+                % end
+            end
+        end
+    end
+    fprintf('Arranged %s data...\n', string(currentSurvey));
+end
+toc
+
+%%
+% --- Arrange the data tables into a singular table for placement into a
+% spreadsheet to be imported into Power BI ---
+
+for variationType = variationTypeList
+    % identify modified tableTypeList names
+    switch string(variationType)
+        case 'Standard'
+            tableTypeListMod = tableTypeList;
+        otherwise
+            tableTypeListMod = join([tableTypeList', repmat(variationType, length(tableTypeList), 1)], '')';
+    end
+    % determine the height of the final table 
+    cellHeightPowerBI.(string(variationType)) = 1;
+    for currentSurvey = surveyList
+        for headerGroupNum = 1:length(outputDataTablesCell.(string(tableTypeListMod(1))).(string(currentSurvey)))
+            cellHeightPowerBI.(string(variationType)) = cellHeightPowerBI.(string(variationType)) + (width(outputDataTablesCell.(string(tableTypeListMod(1))).(string(currentSurvey)){headerGroupNum}) * (height(outputDataTablesCell.(string(tableTypeListMod(1))).(string(currentSurvey)){headerGroupNum}) - 1));
+        end
+    end
+    % determine the width of the final table
+    switch string(variationType)
+        case 'Standard'
+            powerBIPrefixHeaders.(string(variationType)) = {'Survey Name','Phase (QuestID)','Page Name'};
+        case 'Weekday'
+            powerBIPrefixHeaders.(string(variationType)) = {'Survey Name','Phase (QuestID)','Page Name','Weekday'};
+        case 'PostalState'
+            powerBIPrefixHeaders.(string(variationType)) = {'Survey Name','Phase (QuestID)','Page Name','PostalState'};
+    end
+    cellWidthPowerBI.(string(variationType)) = length(powerBIPrefixHeaders.(string(variationType))) + length(tableTypeList);
+    
+    % initialize the big table
+    outputDataBigTableCellPowerBI.(string(variationType)) = cell(cellHeightPowerBI.(string(variationType)), cellWidthPowerBI.(string(variationType)));
+    % outputDataBigTableCellPowerBI.(string(variationType))(1,:) = [{'Survey Name','Phase (QuestID)','Page Name','Weekday'}, tableTypeList]; 
+    % outputDataBigTableCellPowerBI.(string(variationType))(1,:) = [{'Survey Name','Phase (QuestID)','Page Name'}, tableTypeList]; 
+    outputDataBigTableCellPowerBI.(string(variationType))(1,:) = [powerBIPrefixHeaders.(string(variationType)), tableTypeListMod]; 
+    for tableType = tableTypeListMod
+        rowIndexPowerBI.(string(variationType)).(string(tableType)) = 2;
+    end
+    
+    for currentSurvey = surveyList
+        for tableType = tableTypeListMod
+            for headerGroupNum = 1:length(outputDataTablesCell.(string(tableType)).(string(currentSurvey)))
+                for phaseNum = 2:height(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum})
+                    % insert survey name
+                    outputDataBigTableCellPowerBI.(string(variationType))(rowIndexPowerBI.(string(variationType)).(string(tableType)) : rowIndexPowerBI.(string(variationType)).(string(tableType)) + width(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}) - 1, matches(outputDataBigTableCellPowerBI.(string(variationType))(1,:), 'Survey Name')) = deal(currentSurvey);
+                    % insert phaseID
+                    if strcmp(currentSurvey, 'Enrollment')
+                        outputDataBigTableCellPowerBI.(string(variationType))(rowIndexPowerBI.(string(variationType)).(string(tableType)) : rowIndexPowerBI.(string(variationType)).(string(tableType)) + width(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}) - 1, matches(outputDataBigTableCellPowerBI.(string(variationType))(1,:), 'Phase (QuestID)')) = deal({sprintf('EnrollDup (%s)', string(extractBetween(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}(phaseNum, 1), '/', whitespacePattern)))});
+                        outputDataBigTableCellPowerBI.(string(variationType))(rowIndexPowerBI.(string(variationType)).(string(tableType)) : rowIndexPowerBI.(string(variationType)).(string(tableType)) + width(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}) - 1, matches(outputDataBigTableCellPowerBI.(string(variationType))(1,:), 'Phase (QuestID)')) = deal({sprintf('EnrollDup (%s)', string(extractBetween(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}(phaseNum, 1), '/', whitespacePattern)))});
+                    else
+                        outputDataBigTableCellPowerBI.(string(variationType))(rowIndexPowerBI.(string(variationType)).(string(tableType)) : rowIndexPowerBI.(string(variationType)).(string(tableType)) + width(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}) - 1, matches(outputDataBigTableCellPowerBI.(string(variationType))(1,:), 'Phase (QuestID)')) = deal({sprintf('%s (%s)', string(extract(extractBefore(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}(phaseNum, 1), '/'), digitsPattern)), string(extractBetween(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}(phaseNum, 1), '/', whitespacePattern)))});
+                        outputDataBigTableCellPowerBI.(string(variationType))(rowIndexPowerBI.(string(variationType)).(string(tableType)) : rowIndexPowerBI.(string(variationType)).(string(tableType)) + width(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}) - 1, matches(outputDataBigTableCellPowerBI.(string(variationType))(1,:), 'Phase (QuestID)')) = deal({sprintf('%s (%s)', string(extract(extractBefore(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}(phaseNum, 1), '/'), digitsPattern)), string(extractBetween(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}(phaseNum, 1), '/', whitespacePattern)))});
+                    end
+                    % insert 'Surveys Sent' page name before adding actual page names
+                    outputDataBigTableCellPowerBI.(string(variationType))(rowIndexPowerBI.(string(variationType)).(string(tableType)), matches(outputDataBigTableCellPowerBI.(string(variationType))(1,:), 'Page Name')) = {'Surveys Sent'};
+                    % insert actual page names
+                    outputDataBigTableCellPowerBI.(string(variationType))(rowIndexPowerBI.(string(variationType)).(string(tableType)) + 1 : rowIndexPowerBI.(string(variationType)).(string(tableType)) + width(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}) - 1, matches(outputDataBigTableCellPowerBI.(string(variationType))(1,:), 'Page Name')) = outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}(1, 2:end)';
+                    % insert data  
+                    outputDataBigTableCellPowerBI.(string(variationType))(rowIndexPowerBI.(string(variationType)).(string(tableType)) : rowIndexPowerBI.(string(variationType)).(string(tableType)) + width(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}) - 1, matches(outputDataBigTableCellPowerBI.(string(variationType))(1,:), tableType)) = outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}(phaseNum, :)';
+                    
+                    % insert the day of the week or state abbr
+                    if ~strcmp(variationType, 'Standard')
+                        % insert the day of the week or state abbr
+                        outputDataBigTableCellPowerBI.(string(variationType))(rowIndexPowerBI.(string(variationType)).(string(tableType)) : rowIndexPowerBI.(string(variationType)).(string(tableType)) + width(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}) - 1, matches(outputDataBigTableCellPowerBI.(string(variationType))(1,:), variationType)) = extractAfter(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum}(phaseNum, 1), '- ');
+                    end
+                    
+                    rowIndexPowerBI.(string(variationType)).(string(tableType)) = rowIndexPowerBI.(string(variationType)).(string(tableType)) + width(outputDataTablesCell.(string(tableType)).(string(currentSurvey)){headerGroupNum});
+                end
+            end
+        end
+    end
+
+    % --- Format the tables further --- 
+    % if tableType isn't Standard, remove variationType from end of column headers
+    if ~strcmp(variationType, 'Standard')
+        outputDataBigTableCellPowerBI.(string(variationType))(1, length(powerBIPrefixHeaders.(string(variationType))) + 1 : end) = tableTypeList;
+    end
+    % - move phaseID/questID (n=####) row entries to a "Total Surveys" column -
+    outputDataBigTableCellPowerBI.(string(variationType))(1, width(outputDataBigTableCellPowerBI.(string(variationType)))+1) = {'Total Surveys'};
+    % move headers from first tableType column to "Total Surveys"
+    outputDataBigTableCellPowerBI.(string(variationType))([false; cellfun(@ischar, outputDataBigTableCellPowerBI.(string(variationType))(2:end, matches(outputDataBigTableCellPowerBI.(string(variationType))(1,:), tableTypeList(1))))], end) = outputDataBigTableCellPowerBI.(string(variationType))([false; cellfun(@ischar, outputDataBigTableCellPowerBI.(string(variationType))(2:end, matches(outputDataBigTableCellPowerBI.(string(variationType))(1,:), tableTypeList(1))))], matches(outputDataBigTableCellPowerBI.(string(variationType))(1,:), tableTypeList(1)));
+    % replace cells that had survey name info with NaNs
+    outputDataBigTableCellPowerBI.(string(variationType))([false; cellfun(@ischar, outputDataBigTableCellPowerBI.(string(variationType))(2:end, end))], find(matches(outputDataBigTableCellPowerBI.(string(variationType))(1,:), tableTypeList(1))):end-1) = {NaN}; 
+    
+    % - rename (ex. Dup88/20250101 (n=6659)) to (ex. (n=6659)) -
+    outputDataBigTableCellPowerBI.(string(variationType))([false; cellfun(@ischar, outputDataBigTableCellPowerBI.(string(variationType))(2:end, end))], end) = extract(outputDataBigTableCellPowerBI.(string(variationType))([false; cellfun(@ischar, outputDataBigTableCellPowerBI.(string(variationType))(2:end, end))], end), '(n=' + digitsPattern + ')');
+    
+    % - replace empty cells in outputDataBigTableCellPowerBI with NaNs -
+    outputDataBigTableCellPowerBI.(string(variationType))([false(1, width(outputDataBigTableCellPowerBI.(string(variationType)))); false(height(outputDataBigTableCellPowerBI.(string(variationType))) - 1, find(matches(outputDataBigTableCellPowerBI.(string(variationType))(1,:), tableTypeList(1))) - 1), cellfun(@isempty, outputDataBigTableCellPowerBI.(string(variationType))(2:end, find(matches(outputDataBigTableCellPowerBI.(string(variationType))(1,:), tableTypeList(1))):end))]) = {NaN};
+    
+    % - make tableTypeList headers in outputDataBigTableCellPowerBI pretty -
+    outputDataBigTableCellPowerBI.(string(variationType))(1,contains(outputDataBigTableCellPowerBI.(string(variationType))(1,:), 'percent')) = join([outputDataBigTableCellPowerBI.(string(variationType))(1,contains(outputDataBigTableCellPowerBI.(string(variationType))(1,:), 'percent'))', repmat({'%'}, length(outputDataBigTableCellPowerBI.(string(variationType))(1,contains(outputDataBigTableCellPowerBI.(string(variationType))(1,:), 'percent'))), 1)], ' ')';
+    outputDataBigTableCellPowerBI.(string(variationType))(1,:) = replace(outputDataBigTableCellPowerBI.(string(variationType))(1,:), {'percentPage','page'}, '');
+    
+    % - zero pad all single-digit pages in Page Name (i.e., [1] -> [01]) -
+    outputDataBigTableCellPowerBI.(string(variationType))(startsWith(outputDataBigTableCellPowerBI.(string(variationType))(:, matches(outputDataBigTableCellPowerBI.(string(variationType))(1,:), 'Page Name')), '[' + digitsPattern + ']'), 3) = join([repmat({'['}, sum(startsWith(outputDataBigTableCellPowerBI.(string(variationType))(:, matches(outputDataBigTableCellPowerBI.(string(variationType))(1,:), 'Page Name')), '[' + digitsPattern + ']')), 1), ...
+                                                                                                                                                                               strsplit(strtrim(sprintf('%02d ', str2double(string(extractBetween(outputDataBigTableCellPowerBI.(string(variationType))(startsWith(outputDataBigTableCellPowerBI.(string(variationType))(:, matches(outputDataBigTableCellPowerBI.(string(variationType))(1,:), 'Page Name')), '[' + digitsPattern + ']'), matches(outputDataBigTableCellPowerBI.(string(variationType))(1,:), 'Page Name')), '[', ']'))))))', ...
+                                                                                                                                                                               repmat({']'}, sum(startsWith(outputDataBigTableCellPowerBI.(string(variationType))(:, matches(outputDataBigTableCellPowerBI.(string(variationType))(1,:), 'Page Name')), '[' + digitsPattern + ']')), 1), ...
+                                                                                                                                                                               extractAfter(outputDataBigTableCellPowerBI.(string(variationType))(startsWith(outputDataBigTableCellPowerBI.(string(variationType))(:, matches(outputDataBigTableCellPowerBI.(string(variationType))(1,:), 'Page Name')), '[' + digitsPattern + ']'), matches(outputDataBigTableCellPowerBI.(string(variationType))(1,:), 'Page Name')), '[' + digitsPattern + ']')], '');
+    
+    
+    % format all percentage values as a fracion of 1 (i.e., 69.0 -> 0.690)
+    outputDataBigTableCellPowerBI.(string(variationType))(2:end, contains(outputDataBigTableCellPowerBI.(string(variationType))(1,:), '%')) = num2cell(cell2mat(outputDataBigTableCellPowerBI.(string(variationType))(2:end, contains(outputDataBigTableCellPowerBI.(string(variationType))(1,:), '%'))) / 100);
+    
+    % for Weekday, create a column at the end that represents the position
+    % in the week for the corresponding weekday (e.g., Monday = 1, Saturday
+    % = 6, etc.)
+    if strcmp(variationType, 'Weekday')
+        outputDataBigTableCellPowerBI.(string(variationType))(1, width(outputDataBigTableCellPowerBI.(string(variationType)))+1) = {'WeekdayIndex'};
+        outputDataBigTableCellPowerBI.(string(variationType))(2:end, end) = replace(outputDataBigTableCellPowerBI.(string(variationType))(2:end, matches(outputDataBigTableCellPowerBI.(string(variationType))(1,:), 'Weekday')), weekdayList, string(1:length(weekdayList)));
+    end
+end
+%%
+% --- Calculate phase aggregates ---
+% calculate aggregates for every combination of the following:
+% Survey: [Enrollment, Long, Short]
+% Period: [All Time (as a scalar), by Every Phase, by Every Week each Phase]
+% Status: [Sent, Started, Completed]
+statusList = {'Sent','Started','Completed'};
+aggData = struct;
+tic
+for currentSurvey = surveyList
+    for currentStatus = statusList
+        % All Time (as a scalar)
+        aggdata.(string(currentSurvey)).allTime.(string(currentStatus)) = 0; % initialize
+        for phaseName = phaseList.(string(currentSurvey))
+            if strcmp(currentStatus, 'Sent') % if looking at pageStarted or pageCompleted, use data corresponding to 'pg1'
+                aggdata.(string(currentSurvey)).allTime.(string(currentStatus)) = aggdata.(string(currentSurvey)).allTime.(string(currentStatus)) + height(queryList.(string(queryListFieldNames(endsWith(queryListFieldNames, currentStatus)))).(string(currentSurvey)).data.(string(phaseName)));
+            else
+                aggdata.(string(currentSurvey)).allTime.(string(currentStatus)) = aggdata.(string(currentSurvey)).allTime.(string(currentStatus)) + height(queryList.(string(queryListFieldNames(endsWith(queryListFieldNames, currentStatus)))).(string(currentSurvey)).data.(string(phaseName)).pg1);
+            end
+        end
+
+        % By Every Phase
+        aggdata.(string(currentSurvey)).byPhase.(string(currentStatus)) = cell(length(phaseList.(string(currentSurvey))) + 1, 2); % initialize (first column is phaseName, second column is data)
+        aggdata.(string(currentSurvey)).byPhase.(string(currentStatus))(1,:) = {'PhaseName','Data'};
+        for phaseNum = 1:length(phaseList.(string(currentSurvey)))
+            if strcmp(currentStatus, 'Sent') % if looking at pageStarted or pageCompleted, use data corresponding to 'pg1'
+                aggdata.(string(currentSurvey)).byPhase.(string(currentStatus))(phaseNum + 1, :) = [phaseList.(string(currentSurvey))(phaseNum), height(queryList.(string(queryListFieldNames(endsWith(queryListFieldNames, currentStatus)))).(string(currentSurvey)).data.(string(phaseList.(string(currentSurvey))(phaseNum))))];
+            else
+                aggdata.(string(currentSurvey)).byPhase.(string(currentStatus))(phaseNum + 1, :) = [phaseList.(string(currentSurvey))(phaseNum), height(queryList.(string(queryListFieldNames(endsWith(queryListFieldNames, currentStatus)))).(string(currentSurvey)).data.(string(phaseList.(string(currentSurvey))(phaseNum))).pg1)];
+            end
+        end
+
+        % By Every Week each Phase
+        % determine how many weeks total there are for all the phases
+        totalWeeks = sum(ceil(str2num(char(extract(cellstr(between(datetime(queryList.availablePhases.(string(currentSurvey)).data.StartDate, 'InputFormat','yyyy-MM-dd hh:mm:ss.SSS'), datetime(queryList.availablePhases.(string(currentSurvey)).data.EndDate, 'InputFormat','yyyy-MM-dd hh:mm:ss.SSS'), 'Days')), digitsPattern))) / 7));
+        aggdata.(string(currentSurvey)).byWeek.(string(currentStatus)) = cell(totalWeeks + 1, 3); % initialize (first column is phaseName, second column is the date for the start of the week, third column is data)
+        aggdata.(string(currentSurvey)).byWeek.(string(currentStatus))(1,:) = {'PhaseName','WeekStartDate','Data'};
+        weekNum = 2;
+        for phaseNum = 1:length(phaseList.(string(currentSurvey)))
+            % generate the list of week starts and ends for each phase
+            startDateList = datetime(queryList.availablePhases.(string(currentSurvey)).data.StartDate(phaseNum), 'InputFormat','yyyy-MM-dd hh:mm:ss.SSS', 'Format','yyyy-MM-dd') : calweeks(1) : datetime(queryList.availablePhases.(string(currentSurvey)).data.EndDate(phaseNum), 'InputFormat','yyyy-MM-dd hh:mm:ss.SSS', 'Format','yyyy-MM-dd');
+            endDateList = [[[datetime(queryList.availablePhases.(string(currentSurvey)).data.StartDate(phaseNum), 'InputFormat','yyyy-MM-dd hh:mm:ss.SSS') + calweeks(1): calweeks(1) : datetime(queryList.availablePhases.(string(currentSurvey)).data.EndDate(phaseNum), 'InputFormat','yyyy-MM-dd hh:mm:ss.SSS')] - caldays(1)], datetime(queryList.availablePhases.(string(currentSurvey)).data.EndDate(phaseNum), 'InputFormat','yyyy-MM-dd hh:mm:ss.SSS')];
+            for dateSetNum = 1:length(startDateList)
+                if strcmp(currentStatus, 'Sent') % if looking at pageStarted or pageCompleted, use data corresponding to 'pg1'
+                    aggdata.(string(currentSurvey)).byWeek.(string(currentStatus))(weekNum, :) = [phaseList.(string(currentSurvey))(phaseNum), char(startDateList(dateSetNum)), sum(isbetween(datetime(extract(queryList.(string(queryListFieldNames(endsWith(queryListFieldNames, currentStatus)))).(string(currentSurvey)).data.(string(phaseList.(string(currentSurvey))(phaseNum))).ActivityDate, digitsPattern(4) + '-' + digitsPattern(2) + '-' + digitsPattern(2)), 'InputFormat','yyyy-MM-dd'), startDateList(dateSetNum), endDateList(dateSetNum)))];
+                else
+                    aggdata.(string(currentSurvey)).byWeek.(string(currentStatus))(weekNum, :) = [phaseList.(string(currentSurvey))(phaseNum), char(startDateList(dateSetNum)), sum(isbetween(datetime(extract(queryList.(string(queryListFieldNames(endsWith(queryListFieldNames, currentStatus)))).(string(currentSurvey)).data.(string(phaseList.(string(currentSurvey))(phaseNum))).pg1.ActivityDate, digitsPattern(4) + '-' + digitsPattern(2) + '-' + digitsPattern(2)), 'InputFormat','yyyy-MM-dd'), startDateList(dateSetNum), endDateList(dateSetNum)))];
+                end
+                weekNum = weekNum + 1;
+            end
+        end
+        fprintf('Aggregated %s data for %s survey...\n', string(currentStatus), string(currentSurvey));
+    end
+end
+toc
+
+%%%%%% FIGURE OUT WHY ActivityDate IS THE SAME FOR SENT, STARTED, AND COMPLETED %%%%%%
+
+%%
+% --- Export data to spreadsheet for Power BI ---
+exportFileNamePowerBI = 'Dupuytrens KPI for Power BI.xlsx';
+for variationType = variationTypeList
+    writecell(outputDataBigTableCellPowerBI.(string(variationType)), exportFileNamePowerBI, 'Sheet', sprintf('KPI - %s', string(variationType)));
+end
+
+
+% -------------------------------------------------------------------------
+function queryParts = evalQuery(inputStruct, title, description, query, dbConnection, databasePrefix1, databasePrefix2)
+    queryParts = inputStruct;
+    queryParts.title = title;
+    queryParts.description = description;
+    switch nargin
+        case 5
+            queryParts.query = query;
+            % set which database to use
+            execute(dbConnection, string(extract(queryParts.query, 'USE ' + lettersPattern)));
+            % run the body of the query, with comments removed (i.e., remove
+            % text between -- and --)
+            [~, queryStart] = regexp(queryParts.query, 'USE \w*[;]? ');
+            if iscell(queryStart)
+                queryStart = cell2mat(queryStart);
+            end
+            queryParts.data = fetch(dbConnection, string(replace(extractAfter(queryParts.query, queryStart), '--' + wildcardPattern + '--', '')));
+        case 6
+            queryParts.query.(string(databasePrefix1)) = query;
+            % set which database to use
+            execute(dbConnection, string(extract(queryParts.query.(string(databasePrefix1)), 'USE ' + lettersPattern)));
+            % run the body of the query, with comments removed (i.e., remove
+            % text between -- and --)
+            [~, queryStart] = regexp(queryParts.query.(string(databasePrefix1)), 'USE \w*[;]? ');
+            if iscell(queryStart)
+                queryStart = cell2mat(queryStart);
+            end
+            queryParts.data.(string(databasePrefix1)) = fetch(dbConnection, string(replace(extractAfter(queryParts.query.(string(databasePrefix1)), queryStart), '--' + wildcardPattern + '--', '')));
+        case 7
+            queryParts.query.(string(databasePrefix1)).(string(databasePrefix2)) = query;
+            % set which database to use
+            execute(dbConnection, string(extract(queryParts.query.(string(databasePrefix1)).(string(databasePrefix2)), 'USE ' + lettersPattern)));
+            % run the body of the query, with comments removed (i.e., remove
+            % text between -- and --)
+            [~, queryStart] = regexp(queryParts.query.(string(databasePrefix1)).(string(databasePrefix2)), 'USE \w*[;]? ');
+            if iscell(queryStart)
+                queryStart = cell2mat(queryStart);
+            end
+            queryParts.data.(string(databasePrefix1)).(string(databasePrefix2)) = fetch(dbConnection, string(replace(extractAfter(queryParts.query.(string(databasePrefix1)).(string(databasePrefix2)), queryStart), '--' + wildcardPattern + '--', '')));
+        otherwise
+            error('No case to handle %d input arguments', nargin);
+    end
+end
+
+function queryParts = evalQueryBig(inputStruct, title, description, tableVarNames, query, databasePrefix1, databasePrefix2)
+    sqlDataFilename = 'C:\Users\Matt\Documents\GitHub\Dupuytren-Scripts\SQL Export Data\Current SQL Export.csv';
+    literalQueryPowershell = replace(replace(replace(string(replace(query, '--' + wildcardPattern + '--', '')), whitespacePattern, ' '), '( ', '('), ' )', ')');
+    % run the query, with comments removed (i.e., remove
+    % text between -- and --), then export results to a spreadsheet
+    tic
+    system(sprintf(['bcp "%s" query' ...
+        'out "%s" -w -U matt -P ardent-refurbished-knit -S 10.0.100.70'], literalQueryPowershell, sqlDataFilename))
+    fprintf('%s Exported = %.3g sec\n', string(title), toc);
+
+    % load queried data that was exported to spreadsheet
+    tic
+    rawDataCell = readcell(sqlDataFilename);
+    
+    queryParts = inputStruct;
+    queryParts.title = title;
+    queryParts.description = description;
+    switch nargin
+        case 5
+            queryParts.query = query;
+            % format loaded data as table
+            queryParts.data = cell2table(sortrows(rawDataCell, 1), 'VariableNames',tableVarNames);
+        case 6
+            queryParts.query.(string(databasePrefix1)) = query;
+            % format loaded data as table
+            queryParts.data.(string(databasePrefix1)) = cell2table(sortrows(rawDataCell, 1), 'VariableNames',tableVarNames);
+        case 7
+            queryParts.query.(string(databasePrefix1)).(string(databasePrefix2)) = query;
+            % format loaded data as table
+            queryParts.data.(string(databasePrefix1)).(string(databasePrefix2)) = cell2table(sortrows(rawDataCell, 1), 'VariableNames',tableVarNames);
+        otherwise
+            error('No case to handle %d input arguments', nargin);
+    end
+    delete(sqlDataFilename);
+    fprintf('%s Loaded = %.3g sec\n', string(title), toc);
+end
+
+
+function rgbArray = colorMapCalc(percentVal, customCMap)
+    % this function maps percentVal, a decimal between 0-1, onto a color map 
+    % specified by customCMap, an nx3 array, where each row contains an rgb
+    % triplet [0-255]. percentVal = 0 -> customCMap(1,:). percentVal = 1 
+    % -> customCMap(n,:).
+    
+    if isnan(percentVal)
+        rgbArray = [255, 255, 255];
+    else
+        % determine where on the color map percentVal falls
+        cmapLoc = ((height(customCMap)-1) * percentVal) + 1;
+        if round(cmapLoc) == cmapLoc
+            rgbArray = customCMap(cmapLoc, :);
+        else
+            for rgbIndex = 1:3
+                rgbArray(rgbIndex) = round(interp1([floor(cmapLoc), ceil(cmapLoc)], [customCMap(floor(cmapLoc), rgbIndex), customCMap(ceil(cmapLoc), rgbIndex)], cmapLoc));
+            end
+        end
+    end
+end
+
+function range = excelRangeFinder(startRow,endRow,startCol,endCol)
+    range = sprintf('%s%d:%s%d',colLetterConverter(startCol),startRow,colLetterConverter(endCol),endRow);
+
+    function colLetter = colLetterConverter(colNum)
+        colLetter = char(strrep(cellstr(char([floor((colNum-1)/689)',rem(floor((colNum-1)/26)'-1,26)+1,rem(colNum-1,26)'+1]+64)),'@',''));
+    end
+end
+
+function colorVal = excelInteriorColorConverter(b)
+    % b is an array of the form [b1, b2, b3], where b1, b2, and b3 are
+    % within the range [0,255]
+    colorVal = sum([256^0, 256^1, 256^2] .* double(b));
+end
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
